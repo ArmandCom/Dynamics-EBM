@@ -33,7 +33,7 @@ from pathlib import Path
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
 
 homedir = '/data/Armand/EBM/'
-port = 6014
+port = 6010
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -103,6 +103,7 @@ parser.add_argument('--sm', action='store_true', help='Whether we compute the sm
 parser.add_argument('--sm_coeff', default=1, type=float, help='Coefficient multiplying the Smoothness term in the loss')
 parser.add_argument('--spectral_norm', action='store_true', help='Spectral normalization in ebm')
 parser.add_argument('--momentum', default=0.0, type=float, help='Momenum update for Langevin Dynamics')
+parser.add_argument('--sample_ema', action='store_true', help='If set to True, we sample from the ema model')
 
 parser.add_argument('--step_lr', default=500.0, type=float, help='step size of latents')
 parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
@@ -156,7 +157,7 @@ def average_gradients(models):
             dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
             param.grad.data /= size
 
-def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, weights=None):
+def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, weights=None):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
@@ -204,7 +205,11 @@ def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=
                 pass
             else:
                 ix = j % FLAGS.components # model[i] = EBMi
-                energy = models[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
+                if FLAGS.sample_ema:
+                    energy = models_ema[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
+                else:
+                    energy = models[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
+
 
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
         # Get grad for current optimization iteration.
@@ -251,12 +256,6 @@ def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=
     return feat_neg, feat_negs, feat_neg_kl, feat_grad, masks
 
 
-def ema_model(models, models_ema, mu=0.999): # Q: When is this used?
-    for (model, model_ema) in zip(models, models_ema):
-        for param, param_ema in zip(model.parameters(), model_ema.parameters()):
-            param_ema.data[:] = mu * param_ema.data + (1 - mu) * param.data
-
-
 def sync_model(models): # Q: What is this about?
     size = float(dist.get_world_size())
 
@@ -281,7 +280,7 @@ def init_model(FLAGS, device, dataset):
     return models, optimizers
 
 
-def test(train_dataloader, models, FLAGS, step=0):
+def test(train_dataloader, models, models_ema, FLAGS, step=0):
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
@@ -310,7 +309,7 @@ def test(train_dataloader, models, FLAGS, step=0):
         feat_neg = torch.rand_like(feat)
         # feat_neg_init = feat_neg
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, feat_neg, feat, FLAGS.num_steps, FLAGS.sample,
+        feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
 
         feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
@@ -416,7 +415,7 @@ def test(train_dataloader, models, FLAGS, step=0):
     [model.train() for model in models]
 
 
-def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, logdir, rank_idx):
+def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx):
     # TODO: Do we need replay buffer?
 
     it = FLAGS.resume_iter
@@ -448,7 +447,7 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
             feat_neg = torch.rand_like(feat)
             feat_neg_init = feat_neg
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, feat_neg, feat, FLAGS.num_steps, FLAGS.sample)
+            feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample)
 
             feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
@@ -479,14 +478,36 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
                 loss_sm = torch.pow(feat_negs[:, -1, ..., 1:, :] - feat_negs[:, -1, ..., :-1, :], 2).mean()
             else:
                 loss_sm = torch.zeros(1).mean()
+
             ## KL loss
             if FLAGS.kl:
                 # raise NotImplementedError
                 ix = random.randint(0, len(models) - 1)
-                model = models[ix]
+                model = models[ix] # Note: maybe we should sample from all them
                 model.requires_grad_(False)
                 loss_kl = model.forward(feat_neg_kl, latents[ix])
                 model.requires_grad_(True)
+
+                # if FLAGS.repel_im:
+                #     bs = feat_neg_kl.size(0)
+                #
+                #     # if FLAGS.dataset in ["celeba", "imagenet", "object", "lsun", "stl"]:
+                #     #     feat_neg_kl = feat_neg_kl[:, :, :, :].contiguous()
+                #
+                #     feat_flat = torch.clamp(feat_neg_kl.view(bs, -1), -1, 1)
+                #
+                #     if len(replay_buffer) > 1000:
+                #         compare_batch, idxs = replay_buffer.sample(100, no_transform=False, downsample=True)
+                #         compare_batch = decompress_x_mod(compare_batch)
+                #         compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
+                #         compare_flat = compare_batch.view(100, -1)
+                #         dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
+                #         loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
+                #     else:
+                #         loss_repel = torch.zeros(1).cuda(rank_idx)
+                #     loss = loss - 0.3 * loss_repel
+                # else:
+                #     loss_repel = torch.zeros(1)
             else:
                 loss_kl = torch.zeros(1)
 
@@ -496,43 +517,7 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
             #     model.requires_grad_(True)
             #     loss = loss + FLAGS.kl_coeff * loss_kl.mean()
             #
-            #     if FLAGS.repel_im:
-            #         start = timeit.timeit()
-            #         bs = im_neg_kl.size(0)
-            #
-            #         if FLAGS.dataset in ["celeba", "imagenet", "object", "lsun", "stl"]:
-            #             im_neg_kl = im_neg_kl[:, :, :, :].contiguous()
-            #
-            #         im_flat = torch.clamp(im_neg_kl.view(bs, -1), 0, 1)
-            #
-            #         if FLAGS.dataset == "cifar10":
-            #             if len(replay_buffer) > 1000:
-            #                 compare_batch, idxs = replay_buffer.sample(100, no_transform=False)
-            #                 compare_batch = decompress_x_mod(compare_batch)
-            #                 compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
-            #                 compare_flat = compare_batch.view(100, -1)
-            #
-            #                 dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
-            #                 loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
-            #                 loss = loss - 0.3 * loss_repel
-            #             else:
-            #                 loss_repel = torch.zeros(1)
-            #         else:
-            #             if len(replay_buffer) > 1000:
-            #                 compare_batch, idxs = replay_buffer.sample(100, no_transform=False, downsample=True)
-            #                 compare_batch = decompress_x_mod(compare_batch)
-            #                 compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
-            #                 compare_flat = compare_batch.view(100, -1)
-            #                 dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
-            #                 loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
-            #             else:
-            #                 loss_repel = torch.zeros(1).cuda(rank_idx)
-            #
-            #             loss = loss - 0.3 * loss_repel
-            #
-            #         end = timeit.timeit()
-            #     else:
-            #         loss_repel = torch.zeros(1)
+
             #
             # else:
             #     loss_kl = torch.zeros(1)
@@ -552,7 +537,8 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
             [optimizer.step() for optimizer in optimizers]
             [optimizer.zero_grad() for optimizer in optimizers]
 
-            # ema_model(models, models_ema, mu=0.999)
+            if FLAGS.sample_ema:
+                ema_model(models, models_ema, mu=0.9)
 
             if it % FLAGS.log_interval == 0 and rank_idx == 0:
                 loss = loss.item()
@@ -588,7 +574,7 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
                 logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0)[1], it)
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0)[1], it)
 
-                print(string)
+                print(string + ' ' + logger.log_dir.split('/')[-1])
                 # Note: Log it into tensorboard.
 
             if it % FLAGS.save_interval == 0 and rank_idx == 0:
@@ -607,7 +593,7 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
                 print("Saving model in directory....")
                 print('run test')
 
-                test(test_dataloader, models, FLAGS, step=it)
+                test(test_dataloader, models, models_ema, FLAGS, step=it)
 
             it += 1
 
@@ -661,6 +647,7 @@ def main_single(rank, FLAGS):
                           + '_SM' + str(int(FLAGS.sm))
                           + '_SN' + str(int(FLAGS.spectral_norm))
                           + '_Mom' + str(FLAGS.momentum)
+                          + '_EMA' + str(int(FLAGS.sample_ema))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))
                           + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
         if FLAGS.logname != '':
@@ -690,7 +677,7 @@ def main_single(rank, FLAGS):
         FLAGS.num_steps = FLAGS_OLD.num_steps
         # TODO: Check what attributes we are missing
         models, optimizers  = init_model(FLAGS, device, dataset)
-        # models_ema, _  = init_model(FLAGS, device, dataset)
+        models_ema, _  = init_model(FLAGS, device, dataset)
 
         state_dict = models[0].state_dict()
 
@@ -698,19 +685,19 @@ def main_single(rank, FLAGS):
             model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
 
-        # for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
-        #     model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-        #     optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)], strict=False)
-        #     model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
+        for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
+            model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
+            model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
 
     else:
         models, optimizers = init_model(FLAGS, device, dataset)
-        # models_ema, _  = init_model(FLAGS, device, dataset)
+        models_ema, _  = init_model(FLAGS, device, dataset)
 
     if FLAGS.gpus > 1:
         sync_model(models)
 
-    # ema_model(models, models_ema, mu=0.0)
+    ema_model(models, models_ema, mu=0.0)
 
     train_dataloader = DataLoader(dataset, num_workers=FLAGS.data_workers, batch_size=FLAGS.batch_size, shuffle=shuffle, pin_memory=False)
     test_dataloader = DataLoader(test_dataset, num_workers=FLAGS.data_workers, batch_size=FLAGS.num_visuals, shuffle=True, pin_memory=False, drop_last=True)
@@ -720,18 +707,18 @@ def main_single(rank, FLAGS):
 
     if FLAGS.train:
         models = [model.train() for model in models]
-        # models_ema = [model_ema.train() for model_ema in models_ema]
+        models_ema = [model_ema.train() for model_ema in models_ema]
     else:
         models = [model.eval() for model in models]
-        # models_ema = [model_ema.eval() for model_ema in models_ema]
+        models_ema = [model_ema.eval() for model_ema in models_ema]
 
     if FLAGS.train:
-        train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, logdir, rank_idx)
+        train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx)
 
     elif FLAGS.optimize_test: # TODO: What is this
-        test_optimize(test_dataloader, models, FLAGS, step=FLAGS.resume_iter)
+        test_optimize(test_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter)
     else:
-        test(test_dataloader, models, FLAGS, step=FLAGS.resume_iter)
+        test(test_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter)
 
 
 def main():
