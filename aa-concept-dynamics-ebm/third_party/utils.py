@@ -20,6 +20,37 @@ import matplotlib.pyplot as plt
 def swish(x):
     return x * torch.sigmoid(x)
 
+def linear_annealing(device, step, start_step, end_step, start_value, end_value):
+    """
+    Linear annealing
+
+    :param x: original value. Only for getting device
+    :param step: current global step
+    :param start_step: when to start changing value
+    :param end_step: when to stop changing value
+    :param start_value: initial value
+    :param end_value: final value
+    :return:
+    """
+    if device is not None:
+        if step <= start_step:
+            x = torch.tensor(start_value, device=device)
+        elif start_step < step < end_step:
+            slope = (end_value - start_value) / (end_step - start_step)
+            x = torch.tensor(start_value + slope * (step - start_step), device=device)
+        else:
+            x = torch.tensor(end_value, device=device)
+    else:
+        if step <= start_step:
+            x = start_value
+        elif start_step < step < end_step:
+            slope = (end_value - start_value) / (end_step - start_step)
+            x = start_value + slope * (step - start_step)
+        else:
+            x = end_value
+
+    return x
+
 
 class Downsample(nn.Module):
     def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):

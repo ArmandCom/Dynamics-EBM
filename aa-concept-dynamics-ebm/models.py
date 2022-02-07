@@ -5,6 +5,8 @@ import torch
 from easydict import EasyDict
 from downsample import Downsample
 import warnings
+from torch.nn.utils import spectral_norm as sn
+
 warnings.filterwarnings("ignore")
 
 def swish(x):
@@ -45,20 +47,25 @@ class TrajEBM(nn.Module):
         self.filter_dim = filter_dim
         latent_dim_expand = args.latent_dim * args.components
         latent_dim = args.latent_dim
+        spectral_norm = args.spectral_norm
 
         self.components = args.components
 
         n_instance = len(dataset)
 
         # self.conv1 = nn.Conv1d(4, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
-        self.conv1 = nn.Conv1d(4 * args.n_objects, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
+        if spectral_norm:
+            self.conv1 = sn(nn.Conv1d(4 * args.n_objects, filter_dim, kernel_size=5, stride=1, padding=2, bias=True))
+            self.energy_map = sn(nn.Linear(filter_dim * 2, 1))
+        else:
+            self.conv1 = nn.Conv1d(4 * args.n_objects, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
+            self.energy_map = nn.Linear(filter_dim * 2, 1)
 
-        self.layer_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False)
-        self.layer1 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False)
-        self.layer2 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim)
+        self.layer_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
+        self.layer1 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
+        self.layer2 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
 
         self.avg_pool = nn.AvgPool1d(3, stride=2, padding=1)
-        self.energy_map = nn.Linear(filter_dim * 2, 1)
 
         # New
         self.latent_encoder = MLPLatentEncoder(args.timesteps * args.input_dim, args.latent_hidden_dim, args.latent_dim,
@@ -177,7 +184,7 @@ class MLPLatentEncoder(nn.Module):
         return self.fc_out(x)
 
 class CondResBlock1d(nn.Module):
-    def __init__(self, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, latent_grid=False):
+    def __init__(self, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, latent_grid=False, spectral_norm=False):
         super(CondResBlock1d, self).__init__()
 
         self.filters = filters
@@ -192,8 +199,12 @@ class CondResBlock1d(nn.Module):
         else:
             self.bn1 = nn.GroupNorm(32, filters, affine=False)
 
-        self.conv1 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
-        self.conv2 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
+        if spectral_norm:
+            self.conv1 = sn(nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2))
+            self.conv2 = sn(nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2))
+        else:
+            self.conv1 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
+            self.conv2 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
 
         if filters <= 128:
             self.bn2 = nn.InstanceNorm1d(filters, affine=False)
@@ -282,7 +293,7 @@ class MLP(nn.Module):
         x = F.elu(self.fc1(inputs)) # TODO: Switch to swish? (or only in ebm)
         x = F.dropout(x, self.dropout_prob, training=self.training)
         x = F.elu(self.fc2(x))
-        return self.batch_norm(x)
+        return x # Note: removed normalization self.batch_norm(x)
 
 # Other classes
 class CondResBlock(nn.Module):

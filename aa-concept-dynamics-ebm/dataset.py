@@ -315,19 +315,23 @@ class SpringsParticles(data.Dataset):
         num_atoms = loc.shape[3]
 
         # Note: unnormalize
-        print("Unnormalized Spring Dataset")
+        # print("Normalized Spring Dataset")
         # loc_max = loc.max()
         # loc_min = loc.min()
         # vel_max = vel.max()
         # vel_min = vel.min()
-        #b
+        #
         # # Normalize to [-1, 1]
         # loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
         # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+        print("Unnormalized Spring Dataset")
         loc_max = None
         loc_min = None
         vel_max = None
         vel_min = None
+        loc = loc / 5.
+        vel = vel / 5.
 
         # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
         loc = np.transpose(loc, [0, 3, 1, 2])
@@ -361,7 +365,7 @@ class ChargedParticles(data.Dataset):
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
         self.length = feat.shape[0]
-        self.timesteps = 49 #feat.shape[2]
+        self.timesteps = args.num_timesteps #feat.shape[2]
 
         # visualize_trajectories(torch.tensor(feat), None, torch.tensor(edges))
 
@@ -375,6 +379,7 @@ class ChargedParticles(data.Dataset):
 
         # Generate off-diagonal interaction graph
         self.feat, self.edges = feat[:, :, :self.timesteps], edges
+
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
         self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
@@ -408,6 +413,8 @@ class ChargedParticles(data.Dataset):
         # [num_samples, num_timesteps, num_dims, num_atoms]
         num_atoms = loc.shape[3]
 
+        # Note: unnormalize
+        print("Normalized Charged Dataset")
         loc_max = loc.max()
         loc_min = loc.min()
         vel_max = vel.max()
@@ -416,6 +423,14 @@ class ChargedParticles(data.Dataset):
         # Normalize to [-1, 1]
         loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
         vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+        # print("Unnormalized Charged Dataset")
+        # loc_max = None
+        # loc_min = None
+        # vel_max = None
+        # vel_min = None
+        # loc = loc / 5.
+        # vel = vel / 5.
 
         # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
         loc = np.transpose(loc, [0, 3, 1, 2])

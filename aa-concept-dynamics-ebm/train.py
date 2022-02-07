@@ -10,27 +10,30 @@ import torch.distributed as dist
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
-from easydict import EasyDict
+# from easydict import EasyDict
 import os.path as osp
-from torch.nn.utils import clip_grad_norm
-import numpy as np
-from imageio import imwrite
-import cv2
+# from torch.nn.utils import clip_grad_norm
+# import numpy as np
+# from imageio import imwrite
+# import cv2
 import argparse
-import pdb
-from torchvision.datasets import ImageFolder
-import torchvision.transforms as transforms
-import torch.nn as nn
-import torch.optim as optim
-from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+# import pdb
+# from torchvision.datasets import ImageFolder
+# import torchvision.transforms as transforms
+# import torch.nn as nn
+# import torch.optim as optim
+# from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import random
-from torchvision.utils import make_grid
-from imageio import get_writer
-from third_party.utils import visualize_trajectories, get_trajectory_figure
+# from torchvision.utils import make_grid
+# from imageio import get_writer
+from third_party.utils import visualize_trajectories, get_trajectory_figure, linear_annealing
 # from third_party.utils import ReplayBuffer, ReservoirBuffer, init_distributed_mode
 from pathlib import Path
 
+# --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
+
 homedir = '/data/Armand/EBM/'
+port = 6014
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -53,7 +56,6 @@ parser.add_argument('--n_objects', default=3, type=int, help='Dataset to use (in
 # parser.add_argument('--num-valid', type=int, default=10000, help='Number of validation simulations to generate.')
 # parser.add_argument('--num-test', type=int, default=10000, help='Number of test simulations to generate.')
 parser.add_argument('--sequence_length', type=int, default=5000, help='Length of trajectory.')
-# parser.add_argument('--length-test', type=int, default=10000, help='Length of test set trajectory.')
 parser.add_argument('--sample_freq', type=int, default=100,
                     help='How often to sample the trajectory.')
 parser.add_argument('--noise_var', type=float, default=0.0, help='Variance of the noise if present.')
@@ -66,7 +68,7 @@ parser.add_argument('--batch_size', default=64, type=int, help='size of batch of
 parser.add_argument('--num_epoch', default=10000, type=int, help='number of epochs of training to run')
 parser.add_argument('--lr', default=3e-4, type=float, help='learning rate for training')
 parser.add_argument('--log_interval', default=100, type=int, help='log outputs every so many batches')
-parser.add_argument('--save_interval', default=500, type=int, help='save outputs every so many batches')
+parser.add_argument('--save_interval', default=2000, type=int, help='save outputs every so many batches')
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
@@ -93,10 +95,17 @@ parser.add_argument('--num_timesteps', default=19, type=int, help='constraints')
 parser.add_argument('--num_steps', default=10, type=int, help='Steps of gradient descent for training')
 parser.add_argument('--num_visuals', default=16, type=int, help='Number of visuals')
 parser.add_argument('--num_additional', default=0, type=int, help='Number of additional components to add')
-parser.add_argument('--kl', default=False, help='Whether we compute the KL component of the CD loss')
-parser.add_argument('--kl_coeff', default=1.0, type=float, help='Coefficient multiplying the KL term in the loss')
+
+## Options
+parser.add_argument('--kl', action='store_true', help='Whether we compute the KL component of the CD loss')
+parser.add_argument('--kl_coeff', default=0.2, type=float, help='Coefficient multiplying the KL term in the loss')
+parser.add_argument('--sm', action='store_true', help='Whether we compute the smoothness component of the CD loss')
+parser.add_argument('--sm_coeff', default=1, type=float, help='Coefficient multiplying the Smoothness term in the loss')
+parser.add_argument('--spectral_norm', action='store_true', help='Spectral normalization in ebm')
+parser.add_argument('--momentum', default=0.0, type=float, help='Momenum update for Langevin Dynamics')
 
 parser.add_argument('--step_lr', default=500.0, type=float, help='step size of latents')
+parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
 
 parser.add_argument('--sample', action='store_true', help='generate negative samples through Langevin')
 parser.add_argument('--decoder', action='store_true', help='decoder for model')
@@ -105,7 +114,6 @@ parser.add_argument('--decoder', action='store_true', help='decoder for model')
 parser.add_argument('--nodes', default=1, type=int, help='number of nodes for training')
 parser.add_argument('--gpus', default=3, type=int, help='number of gpus per nodes')
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
-
 
 
 def gaussian_fn(M, std):
@@ -152,6 +160,14 @@ def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
+    ## Step
+    step_lr = FLAGS.step_lr
+    ini_step_lr = step_lr
+
+    ## Momentum parameters
+    momentum = FLAGS.momentum
+    old_update = 0.0
+
     feat_negs = []
     latents = torch.stack(latents, dim=0)
 
@@ -170,10 +186,17 @@ def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=
     for i in range(num_steps):
         feat_noise.normal_()
 
-        # feat_neg = feat_neg + 0.0005 * feat_noise
+        # Linear annealing:
+        if FLAGS.step_lr_decay_factor != 1.0:
+            step_lr = linear_annealing(None, step_lr, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
 
-        if i % 10 == 0 and i < num_steps - 10: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # x, kernel_size, std, interp_size
+        # if FLAGS.anneal:
+        #     im_neg = im_neg + 0.001 * (num_steps - i - 1) / num_steps * im_noise
+        # else:
+        #     im_neg = im_neg + 0.001 * im_noise
+
+        if i % 5 == 0 and i < num_steps - 10: # smooth every 10 and leave the last iterations
+            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         energy = 0
         for j in range(len(latents)):
@@ -200,22 +223,30 @@ def  gen_trajectories(latents, FLAGS, models, feat_neg, feat, num_steps, sample=
                     energy = models[j % FLAGS.components].forward(feat_neg_kl, latents[j]) + energy
             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
 
-            feat_neg_kl = feat_neg_kl - FLAGS.step_lr * feat_grad_kl #[:FLAGS.batch_size]
-            feat_neg_kl = torch.clamp(feat_neg_kl, -5, 5)
+            feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
+            feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
 
         feat_neg = feat_neg.detach()
 
-        if FLAGS.num_fixed_timesteps > 0:
+        ## Momentum update
+        if FLAGS.momentum > 0:
+            update = FLAGS.step_lr * feat_grad[:, :,  FLAGS.num_fixed_timesteps:] + momentum * old_update
+            feat_neg = feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - update # GD computation
+            old_update = update
+        else:
             feat_neg = feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  FLAGS.num_fixed_timesteps:] # GD computation
+
+
+        if FLAGS.num_fixed_timesteps > 0: # TODO: Check if this works for num_fixed_timesteps = 0
             feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
                                   feat_neg], dim=2)
-        else: feat_neg = feat_neg - FLAGS.step_lr * feat_grad # GD computation
+
         latents = latents
 
-        feat_neg = torch.clamp(feat_neg, -5, 5) # TODO: clamp all [-1, 1]
+        feat_neg = torch.clamp(feat_neg, -1, 1)
         feat_negs.append(feat_neg)
         feat_neg = feat_neg.detach()
-        feat_neg.requires_grad_() # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+        feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
     return feat_neg, feat_negs, feat_neg_kl, feat_grad, masks
 
@@ -391,6 +422,9 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
     it = FLAGS.resume_iter
     [optimizer.zero_grad() for optimizer in optimizers]
 
+    # if FLAGS.scheduler:
+    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers, T_max=1000, eta_min=0, last_epoch=-1)
+
     dev = torch.device("cuda")
 
     for epoch in range(FLAGS.num_epoch):
@@ -418,6 +452,9 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
 
             feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
+            # if FLAGS.scheduler:
+            #     scheduler.step()
+
             energy_pos = 0
             energy_neg = 0
 
@@ -437,6 +474,11 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
             loss = energy_pos.mean() - energy_neg.mean()
             loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
+            ## Smoothness loss
+            if FLAGS.sm:
+                loss_sm = torch.pow(feat_negs[:, -1, ..., 1:, :] - feat_negs[:, -1, ..., :-1, :], 2).mean()
+            else:
+                loss_sm = torch.zeros(1).mean()
             ## KL loss
             if FLAGS.kl:
                 # raise NotImplementedError
@@ -448,17 +490,65 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
             else:
                 loss_kl = torch.zeros(1)
 
+            # if FLAGS.kl:
+            #     model.requires_grad_(False)
+            #     loss_kl = model.forward(im_neg_kl, label)
+            #     model.requires_grad_(True)
+            #     loss = loss + FLAGS.kl_coeff * loss_kl.mean()
+            #
+            #     if FLAGS.repel_im:
+            #         start = timeit.timeit()
+            #         bs = im_neg_kl.size(0)
+            #
+            #         if FLAGS.dataset in ["celeba", "imagenet", "object", "lsun", "stl"]:
+            #             im_neg_kl = im_neg_kl[:, :, :, :].contiguous()
+            #
+            #         im_flat = torch.clamp(im_neg_kl.view(bs, -1), 0, 1)
+            #
+            #         if FLAGS.dataset == "cifar10":
+            #             if len(replay_buffer) > 1000:
+            #                 compare_batch, idxs = replay_buffer.sample(100, no_transform=False)
+            #                 compare_batch = decompress_x_mod(compare_batch)
+            #                 compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
+            #                 compare_flat = compare_batch.view(100, -1)
+            #
+            #                 dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
+            #                 loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
+            #                 loss = loss - 0.3 * loss_repel
+            #             else:
+            #                 loss_repel = torch.zeros(1)
+            #         else:
+            #             if len(replay_buffer) > 1000:
+            #                 compare_batch, idxs = replay_buffer.sample(100, no_transform=False, downsample=True)
+            #                 compare_batch = decompress_x_mod(compare_batch)
+            #                 compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
+            #                 compare_flat = compare_batch.view(100, -1)
+            #                 dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
+            #                 loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
+            #             else:
+            #                 loss_repel = torch.zeros(1).cuda(rank_idx)
+            #
+            #             loss = loss - 0.3 * loss_repel
+            #
+            #         end = timeit.timeit()
+            #     else:
+            #         loss_repel = torch.zeros(1)
+            #
+            # else:
+            #     loss_kl = torch.zeros(1)
+            #     loss_repel = torch.zeros(1)
+
             ## MSE Loss
             # im_loss = torch.pow(im_negs[:, -1:] - im[:, None], 2).mean()
             feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
 
-            loss = loss + FLAGS.kl_coeff * loss_kl.mean() #+ feat_loss #
+            loss = loss + FLAGS.kl_coeff * loss_kl.mean() + FLAGS.sm_coeff * loss_sm #+ feat_loss #
             loss.backward()
 
             if FLAGS.gpus > 1:
                 average_gradients(models)
 
-            [torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0) for model in models] # Q: Why clipping grads
+            [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) for model in models] # Q: Why clipping grads
             [optimizer.step() for optimizer in optimizers]
             [optimizer.zero_grad() for optimizer in optimizers]
 
@@ -478,6 +568,8 @@ def train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, 
 
                 if FLAGS.kl:
                     kvs['kl_loss'] = loss_kl.mean().item()
+                if FLAGS.sm:
+                    kvs['sm_loss'] = loss_sm.item()
 
                 kvs['aa-energy_pos_mean'] = energy_pos_mean
                 kvs['aa-energy_neg_mean'] = energy_neg_mean
@@ -536,23 +628,22 @@ def main_single(rank, FLAGS):
     if FLAGS.dataset == 'springs':
         dataset = SpringsParticles(FLAGS, 'train')
         test_dataset = SpringsParticles(FLAGS, 'test')
-        FLAGS.timesteps = dataset.timesteps
     elif FLAGS.dataset == 'charged':
         dataset = ChargedParticles(FLAGS, 'train')
         test_dataset = ChargedParticles(FLAGS, 'test')
-        FLAGS.timesteps = dataset.timesteps
     elif FLAGS.dataset == 'charged_sim':
         dataset = ChargedParticlesSim(FLAGS)
         test_dataset = dataset
-        FLAGS.timesteps = dataset.timesteps
     else:
         raise NotImplementedError
+    FLAGS.timesteps = FLAGS.num_timesteps
 
     shuffle=True
     sampler = None
 
+    # p = random.randint(0, 9)
     if world_size > 1:
-        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:6009', world_size=world_size, rank=rank_idx, group_name="default") # ,
+        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(port), world_size=world_size, rank=rank_idx, group_name="default") # ,
 
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
@@ -566,12 +657,19 @@ def main_single(rank, FLAGS):
                           + '_S-LR' + str(FLAGS.step_lr)
                           + '_NS' + str(FLAGS.num_steps)
                           + '_LR' + str(FLAGS.lr)
-                          + '_KL' + str(int(FLAGS.kl)))
+                          + '_KL' + str(int(FLAGS.kl))
+                          + '_SM' + str(int(FLAGS.sm))
+                          + '_SN' + str(int(FLAGS.spectral_norm))
+                          + '_Mom' + str(FLAGS.momentum)
+                          + '_SeqL' + str(int(FLAGS.num_timesteps))
+                          + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
+        if FLAGS.logname != '':
+            logdir += '_' + FLAGS.logname
+
     FLAGS_OLD = FLAGS
 
     if FLAGS.resume_iter != 0:
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
-
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         FLAGS = checkpoint['FLAGS']
 
@@ -586,21 +684,28 @@ def main_single(rank, FLAGS):
         FLAGS.num_additional = FLAGS_OLD.num_additional
         FLAGS.decoder = FLAGS_OLD.decoder
         FLAGS.optimize_test = FLAGS_OLD.optimize_test
-        FLAGS.temporal = FLAGS_OLD.temporal
-        FLAGS.sim = FLAGS_OLD.sim
+        # FLAGS.sim = FLAGS_OLD.sim
         FLAGS.exp = FLAGS_OLD.exp
         FLAGS.step_lr = FLAGS_OLD.step_lr
         FLAGS.num_steps = FLAGS_OLD.num_steps
-
+        # TODO: Check what attributes we are missing
         models, optimizers  = init_model(FLAGS, device, dataset)
+        # models_ema, _  = init_model(FLAGS, device, dataset)
+
         state_dict = models[0].state_dict()
 
         for i, (model, optimizer) in enumerate(zip(models, optimizers)):
             model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)], strict=False)
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
+
+        # for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
+        #     model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
+        #     optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)], strict=False)
+        #     model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
 
     else:
         models, optimizers = init_model(FLAGS, device, dataset)
+        # models_ema, _  = init_model(FLAGS, device, dataset)
 
     if FLAGS.gpus > 1:
         sync_model(models)
@@ -615,8 +720,10 @@ def main_single(rank, FLAGS):
 
     if FLAGS.train:
         models = [model.train() for model in models]
+        # models_ema = [model_ema.train() for model_ema in models_ema]
     else:
         models = [model.eval() for model in models]
+        # models_ema = [model_ema.eval() for model_ema in models_ema]
 
     if FLAGS.train:
         train(train_dataloader, test_dataloader, logger, models, optimizers, FLAGS, logdir, rank_idx)

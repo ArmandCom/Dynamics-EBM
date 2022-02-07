@@ -4,7 +4,7 @@ import numpy as np
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--simulation', type=str, default='springs',
+parser.add_argument('--simulation', type=str, default='charged',
                     help='What simulation to generate.')
 parser.add_argument('--num-train', type=int, default=50000,
                     help='Number of training simulations to generate.')
@@ -18,7 +18,7 @@ parser.add_argument('--length-test', type=int, default=10000,
                     help='Length of test set trajectory.')
 parser.add_argument('--sample-freq', type=int, default=100,
                     help='How often to sample the trajectory.')
-parser.add_argument('--n-balls', type=int, default=5,
+parser.add_argument('--n-balls', type=int, default=3,
                     help='Number of balls in the simulation.')
 parser.add_argument('--seed', type=int, default=42,
                     help='Random seed.')
