@@ -21,7 +21,7 @@ def swish(x):
     return x * torch.sigmoid(x)
 
 class ReplayBuffer(object):
-    def __init__(self, size, transform, dataset):
+    def __init__(self, size, transform, FLAGS):
         """Create Replay buffer.
         Parameters
         ----------
@@ -32,7 +32,6 @@ class ReplayBuffer(object):
         self._storage = []
         self._maxsize = size
         self._next_idx = 0
-        self.gaussian_blur = GaussianBlur()
 
         # def get_color_distortion(s=1.0):
         #     # s is the strength of color distortion.
@@ -46,14 +45,11 @@ class ReplayBuffer(object):
 
         # color_transform = get_color_distortion()
 
-        if dataset == "cifar10":
-            im_size = 32
+        feat_size = FLAGS.num_timesteps
 
-        self.dataset = dataset
+        self.dataset = FLAGS.dataset
         if transform:
-            if dataset == "cifar10":
-                self.transform = transforms.Compose([transforms.RandomResizedCrop(im_size, scale=(0.08, 1.0)), transforms.RandomHorizontalFlip(), color_transform, transforms.ToTensor()])
-            else: self.transform = None
+            self.transform = None
         else:
             self.transform = None
 
@@ -78,16 +74,6 @@ class ReplayBuffer(object):
         ims = []
         for i in idxes:
             im = self._storage[i]
-
-            if self.dataset != "mnist":
-                if (self.transform is not None) and (not no_transform):
-                    im = im.transpose((1, 2, 0))
-                    im = np.array(self.transform(Image.fromarray(np.array(im))))
-
-                # if downsample and (self.dataset in ["celeba", "object", "imagenet"]):
-                #     im = im[:, ::4, ::4]
-
-            im = im * 255
             ims.append(im)
         return np.array(ims)
 
@@ -123,12 +109,11 @@ class ReplayBuffer(object):
                 self._storage[ix] = data[i]
 
 def compress_x_mod(x_mod):
-    x_mod = (255 * np.clip(x_mod, 0, 1)).astype(np.uint8)
+    x_mod = (np.clip(x_mod, -1, 1)).astype(np.float16)
     return x_mod
 
 def decompress_x_mod(x_mod):
-    x_mod = x_mod / 256  + \
-            np.random.uniform(0, 1 / 256, x_mod.shape)
+    x_mod = x_mod  #+ np.random.uniform(-1, 1 / 5, x_mod.shape) # Note: We do not add noise in the first attempt
     return x_mod
 
 def linear_annealing(device, step, start_step, end_step, start_value, end_value):
@@ -441,216 +426,6 @@ class GaussianBlur(object):
             sample = cv2.GaussianBlur(sample, (self.kernel_size, self.kernel_size), sigma)
 
         return sample
-
-
-class ReplayBuffer(object):
-    def __init__(self, size, transform, dataset, image_size):
-        """Create Replay buffer.
-        Parameters
-        ----------
-        size: int
-            Max number of transitions to store in the buffer. When the buffer
-            overflows the old memories are dropped.
-        """
-        self._storage = []
-        self._maxsize = size
-        self._next_idx = 0
-        self.gaussian_blur = GaussianBlur()
-
-        def get_color_distortion(s=1.0):
-            color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.4*s)
-            rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8)
-            rnd_gray = transforms.RandomGrayscale(p=0.2)
-            color_distort = transforms.Compose([rnd_color_jitter, rnd_gray])
-            return color_distort
-
-        self.dataset = dataset
-        if transform:
-            if dataset == "clevr":
-                color_transform = get_color_distortion(0.5)
-                self.transform = transforms.Compose([transforms.RandomResizedCrop(image_size, scale=(0.08, 1.0)), color_transform, transforms.ToTensor()])
-            elif dataset == "igibson":
-                color_transform = get_color_distortion(0.5)
-                self.transform = transforms.Compose([transforms.RandomResizedCrop(image_size, scale=(0.08, 1.0)), color_transform, transforms.ToTensor()])
-            elif dataset == 'visual_genome':
-                color_transform = get_color_distortion(0.1)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)), color_transform, transforms.ToTensor()])
-            elif dataset == 'blocks':
-                color_transform = get_color_distortion(0.1)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)), color_transform, transforms.ToTensor()])
-            else:
-                raise ValueError(f'invalid dataset: {dataset}')
-        else:
-            self.transform = None
-
-    def __len__(self):
-        return len(self._storage)
-
-    def add(self, ims):
-        batch_size = ims.shape[0]
-        if self._next_idx >= len(self._storage):
-            self._storage.extend(list(ims))
-        else:
-            if batch_size + self._next_idx < self._maxsize:
-                self._storage[self._next_idx:self._next_idx +
-                              batch_size] = list(ims)
-            else:
-                split_idx = self._maxsize - self._next_idx
-                self._storage[self._next_idx:] = list(ims)[:split_idx]
-                self._storage[:batch_size - split_idx] = list(ims)[split_idx:]
-        self._next_idx = (self._next_idx + ims.shape[0]) % self._maxsize
-
-    def _encode_sample(self, idxes, no_transform=False, downsample=False):
-        ims = []
-        for i in idxes:
-            im = self._storage[i]
-
-            if self.transform is not None and not no_transform:
-                im = im.transpose((1, 2, 0))
-                im = np.array(self.transform(Image.fromarray(np.array(im))))
-
-            im = im * 255
-            ims.append(im)
-        return np.array(ims)
-
-    def sample(self, batch_size, no_transform=False, downsample=False):
-        """Sample a batch of experiences.
-        Parameters
-        ----------
-        batch_size: int
-            How many transitions to sample.
-        Returns
-        -------
-        obs_batch: np.array
-            batch of observations
-        act_batch: np.array
-            batch of actions executed given obs_batch
-        rew_batch: np.array
-            rewards received as results of executing act_batch
-        next_obs_batch: np.array
-            next set of observations seen after executing act_batch
-        done_mask: np.array
-            done_mask[i] = 1 if executing act_batch[i] resulted in
-            the end of an episode and 0 otherwise.
-        """
-        idxes = [random.randint(0, len(self._storage) - 1)
-                 for _ in range(batch_size)]
-        return self._encode_sample(idxes, no_transform=no_transform, downsample=downsample), idxes
-
-    def set_elms(self, data, idxes):
-        if len(self._storage) < self._maxsize:
-            self.add(data)
-        else:
-            for i, ix in enumerate(idxes):
-                self._storage[ix] = data[i]
-
-
-class ReservoirBuffer(object):
-    def __init__(self, size, transform, dataset, image_size):
-        """Create Replay buffer.
-        Parameters
-        ----------
-        size: int
-            Max number of transitions to store in the buffer. When the buffer
-            overflows the old memories are dropped.
-        """
-        self._storage = []
-        self._maxsize = size
-        self._next_idx = 0
-        self.n = 0
-
-        def get_color_distortion(s=1.0):
-            color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.4*s)
-            rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8)
-            rnd_gray = transforms.RandomGrayscale(p=0.2)
-            color_distort = transforms.Compose([rnd_color_jitter, rnd_gray])
-            return color_distort
-
-        self.dataset = dataset
-        if transform:
-            if dataset == "clevr":
-                color_transform = get_color_distortion(0.5)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.08, 1.0)), color_transform,
-                     transforms.ToTensor()])
-            elif dataset == "igibson":
-                color_transform = get_color_distortion(0.5)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.08, 1.0)), color_transform,
-                     transforms.ToTensor()])
-            elif dataset == 'visual_genome':
-                color_transform = get_color_distortion(0.1)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)), color_transform,
-                     transforms.ToTensor()])
-            elif dataset == 'blocks':
-                color_transform = get_color_distortion(0.1)
-                self.transform = transforms.Compose(
-                    [transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)), color_transform,
-                     transforms.ToTensor()])
-            else:
-                raise ValueError(f'invalid dataset: {dataset}')
-        else:
-            self.transform = None
-
-    def __len__(self):
-        return len(self._storage)
-
-    def add(self, ims):
-        batch_size = ims.shape[0]
-        if self._next_idx >= len(self._storage):
-            self._storage.extend(list(ims))
-            self.n = self.n + ims.shape[0]
-        else:
-            for im in ims:
-                self.n = self.n + 1
-                ix = random.randint(0, self.n - 1)
-
-                if ix < len(self._storage):
-                    self._storage[ix] = im
-
-        self._next_idx = (self._next_idx + ims.shape[0]) % self._maxsize
-
-    def _encode_sample(self, idxes, no_transform=False, downsample=False):
-        ims = []
-        for i in idxes:
-            im = self._storage[i]
-
-            if self.transform is not None and not no_transform:
-                im = im.transpose((1, 2, 0))
-                im = np.array(self.transform(Image.fromarray(im)))
-
-            im = im * 255
-
-            ims.append(im)
-        return np.array(ims)
-
-    def sample(self, batch_size, no_transform=False, downsample=False):
-        """Sample a batch of experiences.
-        Parameters
-        ----------
-        batch_size: int
-            How many transitions to sample.
-        Returns
-        -------
-        obs_batch: np.array
-            batch of observations
-        act_batch: np.array
-            batch of actions executed given obs_batch
-        rew_batch: np.array
-            rewards received as results of executing act_batch
-        next_obs_batch: np.array
-            next set of observations seen after executing act_batch
-        done_mask: np.array
-            done_mask[i] = 1 if executing act_batch[i] resulted in
-            the end of an episode and 0 otherwise.
-        """
-        idxes = [random.randint(0, len(self._storage) - 1)
-                 for _ in range(batch_size)]
-        return self._encode_sample(idxes, no_transform=no_transform, downsample=downsample), idxes
-
 
 def init_distributed_mode(params):
     """

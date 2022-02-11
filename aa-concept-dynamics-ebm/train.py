@@ -1,9 +1,12 @@
 import torch
-from models import TrajEBM #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+import time
+from models import TrajEBM, TrajGraphEBM #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
-from tensorflow.python.platform import flags
+# from tensorflow.python.platform import flags
+import numpy as np
 import torch.nn.functional as F
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -26,14 +29,13 @@ import argparse
 import random
 # from torchvision.utils import make_grid
 # from imageio import get_writer
-from third_party.utils import visualize_trajectories, get_trajectory_figure, linear_annealing
-# from third_party.utils import ReplayBuffer, ReservoirBuffer, init_distributed_mode
+from third_party.utils import visualize_trajectories, get_trajectory_figure, linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
 
 homedir = '/data/Armand/EBM/'
-port = 6010
+# port = 6021
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -41,6 +43,7 @@ parser = argparse.ArgumentParser(description='Train EBM model')
 parser.add_argument('--train', action='store_true', help='whether or not to train')
 parser.add_argument('--optimize_test', action='store_true', help='whether or not to train')
 parser.add_argument('--cuda', default=True, action='store_true', help='whether to use cuda or not')
+parser.add_argument('--port', default=6010, type=int, help='Port for distributed')
 
 parser.add_argument('--single', action='store_true', help='test overfitting of the dataset')
 
@@ -50,11 +53,8 @@ parser.add_argument('--logdir', default='/data/Armand/EBM/cachedir', type=str, h
 parser.add_argument('--logname', default='', type=str, help='name of logs')
 parser.add_argument('--exp', default='default', type=str, help='name of experiments')
 
-# arguments for NRI charged dataset
+# arguments for NRI springs/charged dataset
 parser.add_argument('--n_objects', default=3, type=int, help='Dataset to use (intphys or others or imagenet or cubes)')
-# parser.add_argument('--num-train', type=int, default=50000, help='Number of training simulations to generate.')
-# parser.add_argument('--num-valid', type=int, default=10000, help='Number of validation simulations to generate.')
-# parser.add_argument('--num-test', type=int, default=10000, help='Number of test simulations to generate.')
 parser.add_argument('--sequence_length', type=int, default=5000, help='Length of trajectory.')
 parser.add_argument('--sample_freq', type=int, default=100,
                     help='How often to sample the trajectory.')
@@ -69,6 +69,8 @@ parser.add_argument('--num_epoch', default=10000, type=int, help='number of epoc
 parser.add_argument('--lr', default=3e-4, type=float, help='learning rate for training')
 parser.add_argument('--log_interval', default=100, type=int, help='log outputs every so many batches')
 parser.add_argument('--save_interval', default=2000, type=int, help='save outputs every so many batches')
+parser.add_argument('--autoencode', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
+parser.add_argument('--forecast', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
@@ -93,6 +95,7 @@ parser.add_argument('--num_fixed_timesteps', default=5, type=int, help='constrai
 parser.add_argument('--num_timesteps', default=19, type=int, help='constraints')
 
 parser.add_argument('--num_steps', default=10, type=int, help='Steps of gradient descent for training')
+parser.add_argument('--num_steps_test', default=40, type=int, help='Steps of gradient descent for training')
 parser.add_argument('--num_visuals', default=16, type=int, help='Number of visuals')
 parser.add_argument('--num_additional', default=0, type=int, help='Number of additional components to add')
 
@@ -104,9 +107,15 @@ parser.add_argument('--sm_coeff', default=1, type=float, help='Coefficient multi
 parser.add_argument('--spectral_norm', action='store_true', help='Spectral normalization in ebm')
 parser.add_argument('--momentum', default=0.0, type=float, help='Momenum update for Langevin Dynamics')
 parser.add_argument('--sample_ema', action='store_true', help='If set to True, we sample from the ema model')
+parser.add_argument('--replay_batch', action='store_true', help='If set to True, we initialize generation from a buffer.')
+parser.add_argument('--buffer_size', default=10000, type=int, help='Size of the buffer')
+parser.add_argument('--entropy_nn', action='store_true', help='If set to True, we add an entropy component to the loss')
+
 
 parser.add_argument('--step_lr', default=500.0, type=float, help='step size of latents')
 parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
+parser.add_argument('--noise_coef', default=0.0, type=float, help='step size of latents')
+parser.add_argument('--noise_decay_factor', default=1.0, type=float, help='step size of latents')
 
 parser.add_argument('--sample', action='store_true', help='generate negative samples through Langevin')
 parser.add_argument('--decoder', action='store_true', help='decoder for model')
@@ -165,6 +174,10 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     step_lr = FLAGS.step_lr
     ini_step_lr = step_lr
 
+    ## Noise
+    noise_coef = FLAGS.noise_coef
+    ini_noise_coef = noise_coef
+
     ## Momentum parameters
     momentum = FLAGS.momentum
     old_update = 0.0
@@ -175,30 +188,30 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
 
+    # TODO: Sample from buffer.
     s = feat.size()
-    masks = torch.zeros(s[0], FLAGS.components, s[-2], s[-1]).to(feat_neg.device)
-    masks.requires_grad_(requires_grad=True)
 
     if FLAGS.num_fixed_timesteps > 0:
         feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
                               feat_neg[:, :,  FLAGS.num_fixed_timesteps:]], dim=2)
-
     feat_neg_kl = None
     for i in range(num_steps):
         feat_noise.normal_()
 
         # Linear annealing:
+        ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
             step_lr = linear_annealing(None, step_lr, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+        ## Add Noise
+        if FLAGS.noise_decay_factor != 1.0:
+            noise_coef = linear_annealing(None, noise_coef, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
+        feat_neg = feat_neg + noise_coef * feat_noise
 
-        # if FLAGS.anneal:
-        #     im_neg = im_neg + 0.001 * (num_steps - i - 1) / num_steps * im_noise
-        # else:
-        #     im_neg = im_neg + 0.001 * im_noise
-
+        # Smoothing # TODO: Increase
         if i % 5 == 0 and i < num_steps - 10: # smooth every 10 and leave the last iterations
             feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
+        # Compute energy
         energy = 0
         for j in range(len(latents)):
             if idx is not None and idx != j:
@@ -209,14 +222,11 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
                     energy = models_ema[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
                 else:
                     energy = models[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
-
-
-        feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
         # Get grad for current optimization iteration.
+        feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
 
-        # TODO: KL term.
-        ### From Compose visual relations ###
-        if i == num_steps - 1 and FLAGS.kl:
+        # KL Term computation ### From Compose visual relations ###
+        if i == num_steps - 1:
             feat_neg_kl = feat_neg
 
             energy = 0
@@ -231,7 +241,7 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
 
-        feat_neg = feat_neg.detach()
+        # feat_neg = feat_neg.detach()
 
         ## Momentum update
         if FLAGS.momentum > 0:
@@ -246,14 +256,13 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
                                   feat_neg], dim=2)
 
-        latents = latents
-
+        # latents = latents
         feat_neg = torch.clamp(feat_neg, -1, 1)
         feat_negs.append(feat_neg)
         feat_neg = feat_neg.detach()
         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
-    return feat_neg, feat_negs, feat_neg_kl, feat_grad, masks
+    return feat_neg, feat_negs, feat_neg_kl, feat_grad
 
 
 def sync_model(models): # Q: What is this about?
@@ -267,16 +276,17 @@ def sync_model(models): # Q: What is this about?
 def init_model(FLAGS, device, dataset):
     if FLAGS.tie_weight:
         if FLAGS.dataset == "charged" or FLAGS.dataset == "springs":
-            model = TrajEBM(FLAGS, dataset).to(device)
+            # model = TrajEBM(FLAGS, dataset).to(device)
+            model = TrajGraphEBM(FLAGS, dataset).to(device)
         else:
             raise NotImplementedError
 
         models = [model for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr)]
+        optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR , betas=(0.0, 0.9), eps=1e-8
     else:
         models = [TrajEBM(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models]
-
+        optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # , betas=(0.0, 0.9), eps=1e-8
+        # TODO: check if betas are correct.
     return models, optimizers
 
 
@@ -296,22 +306,21 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0):
         edges = edges.to(dev)
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
-        idx = idx.to(dev)
-        feat_orig = feat
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
-        batch_size = feat.size(0)
+        bs = feat.size(0)
 
-        latent = models[0].embed_latent(feat, rel_rec, rel_send) # Note: Encoder to get latents.
+        if FLAGS.forecast:
+            feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+        else: feat_enc = feat
+        latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
         latents = [item.squeeze(1) for item in latents]
 
         feat_neg = torch.rand_like(feat)
-        # feat_neg_init = feat_neg
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample,
+        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
-
         feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
         savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
@@ -416,16 +425,19 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0):
 
 
 def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx):
-    # TODO: Do we need replay buffer?
 
     it = FLAGS.resume_iter
     [optimizer.zero_grad() for optimizer in optimizers]
+
+    if FLAGS.replay_batch or FLAGS.entropy_nn:
+        replay_buffer = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)# Flags.transform
 
     # if FLAGS.scheduler:
     #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers, T_max=1000, eta_min=0, last_epoch=-1)
 
     dev = torch.device("cuda")
 
+    start_time = time.perf_counter()
     for epoch in range(FLAGS.num_epoch):
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
@@ -433,107 +445,110 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             edges = edges.to(dev)
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
-            idx = idx.to(dev)
-            feat_orig = feat
 
-            random_idx = random.randint(0, FLAGS.ensembles - 1)
-            random_idx = 0
-
-            latent = models[0].embed_latent(feat, rel_rec, rel_send) # Note: Encoder to get latents.
+            if FLAGS.forecast:
+                feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+            else: feat_enc = feat
+            latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
             latents = torch.chunk(latent, FLAGS.components, dim=1)
             latents = [item.squeeze(1) for item in latents]
+            latent_norm = latent.norm()
 
             feat_neg = torch.rand_like(feat)
-            feat_neg_init = feat_neg
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad, _ = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample)
+            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
+                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
+                replay_batch = decompress_x_mod(replay_batch)
+                replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
+                feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
+
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample)
 
             feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
             # if FLAGS.scheduler:
             #     scheduler.step()
 
-            energy_pos = 0
-            energy_neg = 0
+            ## MSE Loss
+                ## Note: Backprop through all sampling
+            # feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+                ## Note: Backprop through 1 sampling step
+            feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
 
-            energy_poss = []
-            energy_negs = []
-            for i in range(FLAGS.components):
-                energy_poss.append(models[i].forward(feat, latents[i])) # Note: Energy function.
-                energy_negs.append(models[i].forward(feat_neg.detach(), latents[i]))
-                # Q: Understand this line.
+            ## Compute losses
+            if not FLAGS.autoencode:
 
-            ## Contrastive Divergence loss.
-            energy_pos = torch.stack(energy_poss, dim=1)
-            energy_neg = torch.stack(energy_negs, dim=1)
-            ml_loss = (energy_pos - energy_neg).mean()
+                energy_poss = []
+                energy_negs = []
+                for i in range(FLAGS.components):
+                    energy_poss.append(models[i].forward(feat, latents[i])) # Note: Energy function.
+                    energy_negs.append(models[i].forward(feat_neg.detach(), latents[i]))
+                    # Q: Understand this line.
 
-            ## Energy regularization losses
-            loss = energy_pos.mean() - energy_neg.mean()
-            loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+                ## Contrastive Divergence loss.
+                energy_pos = torch.stack(energy_poss, dim=1)
+                energy_neg = torch.stack(energy_negs, dim=1)
+                ml_loss = (energy_pos - energy_neg).mean()
+
+                ## Energy regularization losses
+                loss = energy_pos.mean() - energy_neg.mean()
+                loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+
+            else: loss = feat_loss
+
+            ## Add to the replay buffer
+            if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
+                replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
 
             ## Smoothness loss
             if FLAGS.sm:
-                loss_sm = torch.pow(feat_negs[:, -1, ..., 1:, :] - feat_negs[:, -1, ..., :-1, :], 2).mean()
+                diff_feat_negs = feat_negs[:, -1, ..., 1:, :] - feat_negs[:, -1, ..., :-1, :]
+                # loss_sm = torch.pow(diff_feat_negs, 2).mean()
+                # Second order
+                loss_sm = torch.pow(diff_feat_negs[..., 1:, :] - diff_feat_negs[..., :-1, :], 2).mean()
+                loss = loss + FLAGS.sm_coeff * loss_sm
             else:
                 loss_sm = torch.zeros(1).mean()
 
             ## KL loss
             if FLAGS.kl:
                 # raise NotImplementedError
-                ix = random.randint(0, len(models) - 1)
-                model = models[ix] # Note: maybe we should sample from all them
-                model.requires_grad_(False)
-                loss_kl = model.forward(feat_neg_kl, latents[ix])
-                model.requires_grad_(True)
+                # ix = random.randint(0, len(models) - 1)
+                loss_kl = 0
+                for i in range(FLAGS.components):
+                    model = models[i]
+                    model.requires_grad_(False)
+                    loss_kl = loss_kl + model.forward(feat_neg_kl, latents[i]) # Note: Energy function.
+                    model.requires_grad_(True)
+                loss = loss + FLAGS.kl_coeff * loss_kl.mean()
 
-                # if FLAGS.repel_im:
-                #     bs = feat_neg_kl.size(0)
-                #
-                #     # if FLAGS.dataset in ["celeba", "imagenet", "object", "lsun", "stl"]:
-                #     #     feat_neg_kl = feat_neg_kl[:, :, :, :].contiguous()
-                #
-                #     feat_flat = torch.clamp(feat_neg_kl.view(bs, -1), -1, 1)
-                #
-                #     if len(replay_buffer) > 1000:
-                #         compare_batch, idxs = replay_buffer.sample(100, no_transform=False, downsample=True)
-                #         compare_batch = decompress_x_mod(compare_batch)
-                #         compare_batch = torch.Tensor(compare_batch).cuda(rank_idx)
-                #         compare_flat = compare_batch.view(100, -1)
-                #         dist_matrix = torch.norm(im_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
-                #         loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
-                #     else:
-                #         loss_repel = torch.zeros(1).cuda(rank_idx)
-                #     loss = loss - 0.3 * loss_repel
-                # else:
-                #     loss_repel = torch.zeros(1)
+                if FLAGS.entropy_nn:
+                    bs = feat_neg_kl.size(0)
+
+                    feat_flat = torch.clamp(feat_neg_kl.view(bs, -1), -1, 1)
+
+                    if len(replay_buffer) > bs:
+                        compare_batch, idxs = replay_buffer.sample(100) #, no_transform=False, downsample=True)
+                        compare_batch = decompress_x_mod(compare_batch)
+                        compare_batch = torch.Tensor(compare_batch).cuda(dev)
+                        compare_flat = compare_batch.view(100, -1)
+                        dist_matrix = torch.norm(feat_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
+                        loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
+                    else:
+                        loss_repel = torch.zeros(1).cuda(dev)
+                    loss = loss - 0.3 * loss_repel
+                else:
+                    loss_repel = torch.zeros(1)
             else:
                 loss_kl = torch.zeros(1)
 
-            # if FLAGS.kl:
-            #     model.requires_grad_(False)
-            #     loss_kl = model.forward(im_neg_kl, label)
-            #     model.requires_grad_(True)
-            #     loss = loss + FLAGS.kl_coeff * loss_kl.mean()
-            #
-
-            #
-            # else:
-            #     loss_kl = torch.zeros(1)
-            #     loss_repel = torch.zeros(1)
-
-            ## MSE Loss
-            # im_loss = torch.pow(im_negs[:, -1:] - im[:, None], 2).mean()
-            feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-
-            loss = loss + FLAGS.kl_coeff * loss_kl.mean() + FLAGS.sm_coeff * loss_sm #+ feat_loss #
             loss.backward()
 
             if FLAGS.gpus > 1:
                 average_gradients(models)
 
-            [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) for model in models] # Q: Why clipping grads
+            [torch.nn.utils.clip_grad_norm_(model.parameters(), 10) for model in models] # Note: Takes very long in debug
             [optimizer.step() for optimizer in optimizers]
             [optimizer.zero_grad() for optimizer in optimizers]
 
@@ -542,44 +557,52 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             if it % FLAGS.log_interval == 0 and rank_idx == 0:
                 loss = loss.item()
-                energy_pos_mean = energy_pos.mean().item()
-                energy_neg_mean = energy_neg.mean().item()
-                energy_pos_std = energy_pos.std().item()
-                energy_neg_std = energy_neg.std().item()
 
                 kvs = {}
                 kvs['loss'] = loss
-                kvs['aaa-ml_loss'] = ml_loss.item()
+
+                if not FLAGS.autoencode:
+                    energy_pos_mean = energy_pos.mean().item()
+                    energy_neg_mean = energy_neg.mean().item()
+                    energy_pos_std = energy_pos.std().item()
+                    energy_neg_std = energy_neg.std().item()
+
+                    kvs['aaa-ml_loss'] = ml_loss.item()
+                    kvs['aa-energy_pos_mean'] = energy_pos_mean
+                    kvs['aa-energy_neg_mean'] = energy_neg_mean
+                    kvs['energy_pos_std'] = energy_pos_std
+                    kvs['energy_neg_std'] = energy_neg_std
+
                 kvs['aaa-L2_loss'] = feat_loss.item()
+                kvs['latent norm'] = latent_norm.item()
 
                 if FLAGS.kl:
                     kvs['kl_loss'] = loss_kl.mean().item()
+                if FLAGS.entropy_nn:
+                    kvs['entropy_loss'] = loss_repel.mean().item()
                 if FLAGS.sm:
                     kvs['sm_loss'] = loss_sm.item()
 
-                kvs['aa-energy_pos_mean'] = energy_pos_mean
-                kvs['aa-energy_neg_mean'] = energy_neg_mean
-                kvs['energy_pos_std'] = energy_pos_std
-                kvs['energy_neg_std'] = energy_neg_std
                 kvs['bb-max_abs_grad'] = torch.abs(feat_grad).max()
                 kvs['bb-norm_grad'] = torch.norm(feat_grad)
 
 
-                string = "Iteration {} ".format(it)
+                string = "It {} ".format(it)
 
                 for k, v in kvs.items():
-                    string += "%s: %.6f  " % (k,v)
+                    if k in ['aaa-L2_loss', 'aaa-ml_loss', 'kl_loss']:
+                        string += "%s: %.6f  " % (k,v)
                     logger.add_scalar(k, v, it)
 
                 logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0)[1], it)
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0)[1], it)
 
-                print(string + ' ' + logger.log_dir.split('/')[-1])
-                # Note: Log it into tensorboard.
+                string += 'Time %.2f s' % (time.perf_counter()-start_time)
+                print(string)
+                start_time = time.perf_counter()
 
             if it % FLAGS.save_interval == 0 and rank_idx == 0:
                 model_path = osp.join(logdir, "model_{}.pth".format(it))
-
 
                 ckpt = {'FLAGS': FLAGS}
 
@@ -594,10 +617,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 print('run test')
 
                 test(test_dataloader, models, models_ema, FLAGS, step=it)
+                print('Experiment: ' + logger.log_dir.split('/')[-1])
 
             it += 1
-
-
 
 def main_single(rank, FLAGS):
     rank_idx = FLAGS.node_rank * FLAGS.gpus + rank
@@ -629,8 +651,13 @@ def main_single(rank, FLAGS):
 
     # p = random.randint(0, 9)
     if world_size > 1:
-        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(port), world_size=world_size, rank=rank_idx, group_name="default") # ,
-
+        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(FLAGS.port), world_size=world_size, rank=rank_idx, group_name="default") # ,
+        # while True:
+        #     try:
+        #         print('Trying port {}'.format(port))
+        #         group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(port), world_size=world_size, rank=rank_idx, group_name="default") # ,
+        #         break
+        #     except: port += 1; print('Exception'); pass
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
 
@@ -648,6 +675,9 @@ def main_single(rank, FLAGS):
                           + '_SN' + str(int(FLAGS.spectral_norm))
                           + '_Mom' + str(FLAGS.momentum)
                           + '_EMA' + str(int(FLAGS.sample_ema))
+                          + '_RB' + str(int(FLAGS.replay_batch))
+                          + '_AE' + str(int(FLAGS.autoencode))
+                          + '_FC' + str(int(FLAGS.forecast))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))
                           + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
         if FLAGS.logname != '':
@@ -675,29 +705,35 @@ def main_single(rank, FLAGS):
         FLAGS.exp = FLAGS_OLD.exp
         FLAGS.step_lr = FLAGS_OLD.step_lr
         FLAGS.num_steps = FLAGS_OLD.num_steps
+        FLAGS.num_steps_test = FLAGS_OLD.num_steps_test
+        FLAGS.forecast = FLAGS_OLD.forecast
+        FLAGS.autoencode = FLAGS_OLD.autoencode
+        FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
         # TODO: Check what attributes we are missing
         models, optimizers  = init_model(FLAGS, device, dataset)
-        models_ema, _  = init_model(FLAGS, device, dataset)
 
         state_dict = models[0].state_dict()
 
-        for i, (model, optimizer) in enumerate(zip(models, optimizers)):
-            model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
-
-        for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
-            model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
-            model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
-
+        if FLAGS.sample_ema:
+            models_ema, _  = init_model(FLAGS, device, dataset)
+            for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
+                model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
+                model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
+        else:
+            models_ema = None
+            for i, (model, optimizer) in enumerate(zip(models, optimizers)):
+                model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
     else:
         models, optimizers = init_model(FLAGS, device, dataset)
-        models_ema, _  = init_model(FLAGS, device, dataset)
+        if FLAGS.sample_ema:
+            models_ema, _  = init_model(FLAGS, device, dataset)
+            ema_model(models, models_ema, mu=0.0)
+        else:  models_ema = None
 
     if FLAGS.gpus > 1:
         sync_model(models)
-
-    ema_model(models, models_ema, mu=0.0)
 
     train_dataloader = DataLoader(dataset, num_workers=FLAGS.data_workers, batch_size=FLAGS.batch_size, shuffle=shuffle, pin_memory=False)
     test_dataloader = DataLoader(test_dataset, num_workers=FLAGS.data_workers, batch_size=FLAGS.num_visuals, shuffle=True, pin_memory=False, drop_last=True)
@@ -707,10 +743,12 @@ def main_single(rank, FLAGS):
 
     if FLAGS.train:
         models = [model.train() for model in models]
-        models_ema = [model_ema.train() for model_ema in models_ema]
+        if FLAGS.sample_ema:
+            models_ema = [model_ema.train() for model_ema in models_ema]
     else:
         models = [model.eval() for model in models]
-        models_ema = [model_ema.eval() for model_ema in models_ema]
+        if FLAGS.sample_ema:
+            models_ema = [model_ema.eval() for model_ema in models_ema]
 
     if FLAGS.train:
         train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx)
