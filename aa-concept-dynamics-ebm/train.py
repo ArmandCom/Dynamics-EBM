@@ -122,8 +122,9 @@ parser.add_argument('--decoder', action='store_true', help='decoder for model')
 
 # Distributed training hyperparameters
 parser.add_argument('--nodes', default=1, type=int, help='number of nodes for training')
-parser.add_argument('--gpus', default=3, type=int, help='number of gpus per nodes')
+parser.add_argument('--gpus', default=1, type=int, help='number of gpus per nodes')
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
+parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
 
 
 def gaussian_fn(M, std):
@@ -225,6 +226,10 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
 
+        # Gradient Dropout - Note: Testing.
+        # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
+        # feat_grad = feat_grad * update_mask
+
         # KL Term computation ### From Compose visual relations ###
         if i == num_steps - 1:
             feat_neg_kl = feat_neg
@@ -290,7 +295,7 @@ def init_model(FLAGS, device, dataset):
     return models, optimizers
 
 
-def test(train_dataloader, models, models_ema, FLAGS, step=0):
+def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
@@ -321,13 +326,19 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0):
 
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
-        feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
+        # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
-        savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
-        Path(savedir).mkdir(parents=True, exist_ok=True)
+        if save:
+            # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
+            # Path(savedir).mkdir(parents=True, exist_ok=True)
+            # savename = "s%08d"% (step)
+            # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
+            logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0)[1], step)
+            logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0)[1], step)
+        elif logger is not None:
+            l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
 
-        savename = "s%08d"% (step)
-        visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
 
         # Note: Ask Yilun about all this
         # feat_neg = feat_neg.detach()
@@ -418,7 +429,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0):
         #     im_neg_additional = im_neg_additional.numpy()*255
         #     imwrite("result/%s/s%08d_gen_add.png" % (FLAGS.exp,step), im_neg_additional)
 
-        print('test at step %d done!' % step)
         break
 
     [model.train() for model in models]
@@ -427,6 +437,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0):
 def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx):
 
     it = FLAGS.resume_iter
+    losses, l2_losses = [], []
+
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if FLAGS.replay_batch or FLAGS.entropy_nn:
@@ -555,11 +567,18 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.sample_ema:
                 ema_model(models, models_ema, mu=0.9)
 
-            if it % FLAGS.log_interval == 0 and rank_idx == 0:
-                loss = loss.item()
+            losses.append(loss.item())
+            l2_losses.append(feat_loss.item())
+            if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
+
+                # TODO: Report with test
+
+                avg_loss = sum(losses) / len(losses)
+                avg_feat_loss = sum(l2_losses) / len(l2_losses)
+                losses, l2_losses = [], []
 
                 kvs = {}
-                kvs['loss'] = loss
+                kvs['loss'] = avg_loss
 
                 if not FLAGS.autoencode:
                     energy_pos_mean = energy_pos.mean().item()
@@ -573,7 +592,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     kvs['energy_pos_std'] = energy_pos_std
                     kvs['energy_neg_std'] = energy_neg_std
 
-                kvs['aaa-L2_loss'] = feat_loss.item()
+                kvs['aaa-L2_loss'] = avg_feat_loss
                 kvs['latent norm'] = latent_norm.item()
 
                 if FLAGS.kl:
@@ -597,11 +616,13 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0)[1], it)
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0)[1], it)
 
-                string += 'Time %.2f s' % (time.perf_counter()-start_time)
+                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger)
+
+                string += 'Time: %.1fs' % (time.perf_counter()-start_time)
                 print(string)
                 start_time = time.perf_counter()
 
-            if it % FLAGS.save_interval == 0 and rank_idx == 0:
+            if it % FLAGS.save_interval == 0 and rank_idx == FLAGS.gpu_rank:
                 model_path = osp.join(logdir, "model_{}.pth".format(it))
 
                 ckpt = {'FLAGS': FLAGS}
@@ -616,7 +637,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 print("Saving model in directory....")
                 print('run test')
 
-                test(test_dataloader, models, models_ema, FLAGS, step=it)
+                test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger)
+                print('Test at step %d done!' % it)
                 print('Experiment: ' + logger.log_dir.split('/')[-1])
 
             it += 1
@@ -774,7 +796,7 @@ def main():
     if FLAGS.gpus > 1:
         mp.spawn(main_single, nprocs=FLAGS.gpus, args=(FLAGS,))
     else:
-        main_single(0, FLAGS)
+        main_single(FLAGS.gpu_rank, FLAGS)
 
 
 if __name__ == "__main__":
