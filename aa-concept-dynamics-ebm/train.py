@@ -29,10 +29,12 @@ import argparse
 import random
 # from torchvision.utils import make_grid
 # from imageio import get_writer
-from third_party.utils import visualize_trajectories, get_trajectory_figure, linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod
+from third_party.utils import visualize_trajectories, get_trajectory_figure, \
+    linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
+# python train.py --exp=charged --num_steps=2 --num_steps_test 50 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=64 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode
 
 homedir = '/data/Armand/EBM/'
 # port = 6021
@@ -98,6 +100,7 @@ parser.add_argument('--num_steps', default=10, type=int, help='Steps of gradient
 parser.add_argument('--num_steps_test', default=40, type=int, help='Steps of gradient descent for training')
 parser.add_argument('--num_visuals', default=16, type=int, help='Number of visuals')
 parser.add_argument('--num_additional', default=0, type=int, help='Number of additional components to add')
+parser.add_argument('--plot_attr', default='loc', type=str, help='number of gpus per nodes')
 
 ## Options
 parser.add_argument('--kl', action='store_true', help='Whether we compute the KL component of the CD loss')
@@ -116,6 +119,8 @@ parser.add_argument('--step_lr', default=500.0, type=float, help='step size of l
 parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
 parser.add_argument('--noise_coef', default=0.0, type=float, help='step size of latents')
 parser.add_argument('--noise_decay_factor', default=1.0, type=float, help='step size of latents')
+parser.add_argument('--ns_iteration_end', default=100000, type=int, help='training iteration where the number of sampling steps reach their max.')
+parser.add_argument('--num_steps_end', default=-1, type=int, help='number of sampling steps')
 
 parser.add_argument('--sample', action='store_true', help='generate negative samples through Langevin')
 parser.add_argument('--decoder', action='store_true', help='decoder for model')
@@ -167,7 +172,7 @@ def average_gradients(models):
             dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
             param.grad.data /= size
 
-def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, weights=None):
+def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
@@ -196,16 +201,21 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
                               feat_neg[:, :,  FLAGS.num_fixed_timesteps:]], dim=2)
     feat_neg_kl = None
+
+    # Num steps linear annealing
+    if FLAGS.num_steps_end != -1 or training_step > 0:
+        num_steps = int(linear_annealing(None, training_step, start_step=0, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+
     for i in range(num_steps):
         feat_noise.normal_()
 
-        # Linear annealing:
+        # Linear annealing: # TODO: Test has been incorrect
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
-            step_lr = linear_annealing(None, step_lr, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+            step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
         ## Add Noise
         if FLAGS.noise_decay_factor != 1.0:
-            noise_coef = linear_annealing(None, noise_coef, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
+            noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing # TODO: Increase
@@ -333,8 +343,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0)[1], step)
-            logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0)[1], step)
+            logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
         elif logger is not None:
             l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
@@ -475,12 +485,15 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample)
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample, training_step=it)
 
             feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
             # if FLAGS.scheduler:
             #     scheduler.step()
+
+            # Note: Supervise with accumulated velocity
+            # feat_neg_kl = accumulate_traj(feat_neg_kl)
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
@@ -571,8 +584,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             l2_losses.append(feat_loss.item())
             if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
 
-                # TODO: Report with test
-
                 avg_loss = sum(losses) / len(losses)
                 avg_feat_loss = sum(l2_losses) / len(l2_losses)
                 losses, l2_losses = [], []
@@ -613,8 +624,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                         string += "%s: %.6f  " % (k,v)
                     logger.add_scalar(k, v, it)
 
-                logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0)[1], it)
-                logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0)[1], it)
+                logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
 
                 test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger)
 

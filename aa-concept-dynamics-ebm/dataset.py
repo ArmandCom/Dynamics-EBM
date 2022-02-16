@@ -430,7 +430,7 @@ class ChargedParticles(data.Dataset):
         vel_max = None
         vel_min = None
         loc = loc / 5.
-        vel = vel / 5.
+        vel = vel / 5. #0. #TODO: Hardcoded
 
         # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
         loc = np.transpose(loc, [0, 3, 1, 2])

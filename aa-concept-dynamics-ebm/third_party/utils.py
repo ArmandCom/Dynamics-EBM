@@ -497,7 +497,7 @@ def visualize_trajectories(state, state_gen, edges, savedir=None, b_idx=0):
     # plt.plot(energies)
     # plt.show()
 
-def get_trajectory_figure(state, b_idx, lims=None):
+def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc'):
     fig = plt.figure()
     axes = plt.gca()
     if lims is not None:
@@ -506,7 +506,26 @@ def get_trajectory_figure(state, b_idx, lims=None):
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
     vel_norm = np.sqrt((vel ** 2).sum(axis=1))
-    for i in range(loc.shape[-1]):
-        plt.plot(loc[0, :, 0, i], loc[0, :, 1, i])
-        plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+    if plot_type == 'loc' or plot_type == 'both':
+        for i in range(loc.shape[-1]):
+            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i])
+            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+        pass
+    if plot_type == 'vel' or plot_type == 'both':
+        for i in range(loc.shape[-1]):
+            acc_pos = loc[0, 0:1, 0, i], loc[0, 0:1, 1, i]
+            vels = vel[0, :, 0, i], vel[0, :, 1, i]
+            for t in range(loc.shape[1] - 1):
+                acc_pos = np.concatenate([acc_pos[0], acc_pos[0][t:t+1]+vels[0][t:t+1]]), \
+                          np.concatenate([acc_pos[1], acc_pos[1][t:t+1]+vels[1][t:t+1]])
+            plt.plot(acc_pos[0], acc_pos[1])
+            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+
     return plt, fig
+
+def accumulate_traj(states):
+    loc, vel = states[..., :2], states[..., 2:]
+    acc_pos = loc[:, :, 0:1]
+    for t in range(loc.shape[2] - 1):
+        acc_pos = torch.cat([acc_pos, acc_pos[:, :, t:t+1] + vel[:, :, t:t+1]], dim=2)
+    return torch.cat([acc_pos, vel], dim=-1)
