@@ -724,7 +724,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 ml_loss = (energy_pos - energy_neg).mean()
 
                 ## Energy regularization losses
-                loss = loss + energy_pos.mean() - energy_neg.mean()
+                loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
                 loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
             ## Add to the replay buffer
