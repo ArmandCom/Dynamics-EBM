@@ -30,7 +30,7 @@ import random
 # from torchvision.utils import make_grid
 # from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
-    linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj
+    linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, normalize_trajectories
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
@@ -41,7 +41,6 @@ homedir = '/data/Armand/EBM/'
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
-
 parser.add_argument('--train', action='store_true', help='whether or not to train')
 parser.add_argument('--test_manipulate', action='store_true', help='whether or not to train')
 parser.add_argument('--cuda', default=True, action='store_true', help='whether to use cuda or not')
@@ -92,6 +91,9 @@ parser.add_argument('--optimize_mask', action='store_true', help='also optimize 
 parser.add_argument('--pos_embed', action='store_true', help='add a positional embedding to model')
 parser.add_argument('--spatial_feat', action='store_true', help='use spatial latents for object segmentation')
 parser.add_argument('--dropout', default=0.2, type=float, help='use spatial latents for object segmentation')
+parser.add_argument('--factor_encoder', action='store_true', help='if we use message passing in the encoder')
+parser.add_argument('--normalize_data_latent', action='store_true', help='if we normalize data before encoding the latents')
+
 # Model specific - TrajEBM
 parser.add_argument('--input_dim', default=4, type=int, help='dimension of an object')
 parser.add_argument('--latent_hidden_dim', default=64, type=int, help='hidden dimension of the latent')
@@ -163,13 +165,6 @@ def ema_model(models, models_ema, mu=0.99):
         for param, param_ema in zip(model.parameters(), model_ema.parameters()):
             param_ema.data = mu * param_ema.data + (1 - mu) * param.data
 
-# def ema_grad_norm(grad_norm, grad_norm_ema, mu=0.9):
-#     grad_norm_ema = mu * grad_norm_ema + (1 - mu) * grad_norm
-#     return grad_norm_ema
-#
-# def clip_grad_norm_with_ema(model, grad_norm_ema, std=0.1):
-#     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm_ema.item() * (1 + std))
-
 def get_model_grad_norm(models):
     parameters = [p for p in models[0].parameters() if p.grad is not None and p.requires_grad]
     if len(parameters) == 0:
@@ -198,6 +193,8 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
+    num_fixed_timesteps = FLAGS.num_fixed_timesteps
+
     ## Step
     step_lr = FLAGS.step_lr
     ini_step_lr = step_lr
@@ -219,15 +216,19 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     # TODO: Sample from buffer.
     s = feat.size()
 
-    if FLAGS.num_fixed_timesteps > 0:
-        feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
-                              feat_neg[:, :,  FLAGS.num_fixed_timesteps:]], dim=2)
-    feat_neg_kl = None
-
     # Num steps linear annealing
     if not sample:
         if FLAGS.num_steps_end != -1 and training_step > 0:
             num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+
+        ### FEATURE TEST ### varying fixed steps
+        # if random.random() < 0.5:
+        #     num_fixed_timesteps = random.randint(0, num_fixed_timesteps)
+
+    if FLAGS.num_fixed_timesteps > 0:
+        feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+                              feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+    feat_neg_kl = None
 
     for i in range(num_steps):
         feat_noise.normal_()
@@ -289,15 +290,15 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
 
         ## Momentum update
         if FLAGS.momentum > 0:
-            update = FLAGS.step_lr * feat_grad[:, :,  FLAGS.num_fixed_timesteps:] + momentum * old_update
-            feat_neg = feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - update # GD computation
+            update = FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] + momentum * old_update
+            feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - update # GD computation
             old_update = update
         else:
-            feat_neg = feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  FLAGS.num_fixed_timesteps:] # GD computation
+            feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] # GD computation
 
 
-        if FLAGS.num_fixed_timesteps > 0: # TODO: Check if this works for num_fixed_timesteps = 0
-            feat_neg = torch.cat([feat_fixed[:, :, :FLAGS.num_fixed_timesteps],
+        if num_fixed_timesteps > 0: # TODO: Check if this works for num_fixed_timesteps = 0
+            feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
                                   feat_neg], dim=2)
 
         # latents = latents
@@ -344,8 +345,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
     replay_buffer = None
 
+    print('Begin test:')
     [model.eval() for model in models]
-    # [getattr(model, module).train() for model in models for module in ['rnn1', 'rnn2']]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
@@ -358,7 +359,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
         else: feat_enc = feat
-
+        if FLAGS.normalize_data_latent:
+            feat_enc = normalize_trajectories(feat_enc) # We maxmin normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
@@ -373,20 +375,21 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             latents = [(item.squeeze(1), edge_ids[:, eid, :, None, None]) for eid, item in enumerate(latents)]
         else: latents = [item.squeeze(1) for item in latents]
 
-        feat_neg = torch.rand_like(feat) #* 2 - 1
+        feat_neg = torch.rand_like(feat) * 2 - 1
 
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
                                                                        create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
         if save:
-            b_idx = 2
+            b_idx = 4
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
             logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
+            print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
         #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
@@ -508,6 +511,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
         else: feat_enc = feat
+        if FLAGS.normalize_data_latent:
+            feat_enc = normalize_trajectories(feat_enc)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
@@ -531,7 +536,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
         elif logger is not None:
-            l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
 
 
@@ -659,6 +664,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.forecast:
                 feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
             else: feat_enc = feat
+            if FLAGS.normalize_data_latent:
+                feat_enc = normalize_trajectories(feat_enc)
             latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
             ## Note: TEST FEATURE: Add noise to input after obtaining latents.
@@ -683,7 +690,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, FLAGS.sample, training_step=it)
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
             feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
@@ -698,7 +705,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
                 ## Note: Backprop through 1 sampling step
             feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-
+            print('abc')
             ## Compute losses
             loss = 0
             if FLAGS.autoencode or FLAGS.cd_and_ae:
@@ -925,6 +932,8 @@ def main_single(rank, FLAGS):
                           + '_FC' + str(int(FLAGS.forecast))
                           + '_IE' + str(int(FLAGS.independent_energies))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
+                          + '_FE' + str(int(FLAGS.factor_encoder))
+                          + '_NDL' + str(int(FLAGS.normalize_data_latent))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))
                           + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
         if FLAGS.logname != '':
@@ -940,6 +949,9 @@ def main_single(rank, FLAGS):
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         FLAGS = checkpoint['FLAGS']
 
+        FLAGS.normalize_data_latent = FLAGS_OLD.normalize_data_latent # Maybe we shouldn't override
+        FLAGS.factor_encoder = FLAGS_OLD.factor_encoder
+        FLAGS.plot_attr = FLAGS_OLD.plot_attr
         FLAGS.resume_iter = FLAGS_OLD.resume_iter
         FLAGS.save_interval = FLAGS_OLD.save_interval
         FLAGS.nodes = FLAGS_OLD.nodes
@@ -961,6 +973,7 @@ def main_single(rank, FLAGS):
         FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
         FLAGS.independent_energies = FLAGS_OLD.independent_energies
         FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
+        FLAGS.num_fixed_timesteps = FLAGS_OLD.num_fixed_timesteps
         # TODO: Check what attributes we are missing
         models, optimizers  = init_model(FLAGS, device, dataset)
 
