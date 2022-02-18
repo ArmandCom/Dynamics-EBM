@@ -14,14 +14,6 @@ warnings.filterwarnings("ignore")
 def swish(x):
     return x * torch.sigmoid(x)
 
-class View(nn.Module):
-    def __init__(self, size):
-        super(View, self).__init__()
-        self.size = size
-
-    def forward(self, tensor):
-        return tensor.view(self.size)
-
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
         torch.nn.init.kaiming_normal(m.weight)
@@ -304,6 +296,8 @@ class EdgeGraphEBM(nn.Module):
 
         self.rel_rec = None
         self.rel_send = None
+        self.edge_ids = torch.zeros(2, 6)
+        self.edge_ids[:, 1] = 1
 
     def embed_latent(self, traj, rel_rec, rel_send):
         if self.rel_rec is None and self.rel_send is None:
@@ -353,23 +347,37 @@ class EdgeGraphEBM(nn.Module):
 
         rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
         rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
+        latent, edge_ids = latent
+        BS, NO, _, ND = inputs.shape
+        NR = NO * (NO-1)
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
         x = swish(self.cnn(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
-        x = self.layer_encode(x, latent) # [R, F, T'] --> [R, F, T''] # Conditioning layer
-        x = self.layer1(x, latent) # [R, F, T''] --> [R, F, T'''] # Conditioning layer
 
-        x = x.mean(-1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
-        x = x.reshape(latent.size(0), -1, x.size(-1))
-        x_skip = x
+        # Conditional pass for edge of interest
+        x_sel = (x.reshape(BS, -1, *x.shape[1:]) * edge_ids).sum(1)
+        x_sel = self.layer_encode(x_sel, latent) # [F, T'] --> [F, T''] # Conditioning layer
+        x_sel = self.layer1(x_sel, latent) # [F, T''] --> [F, T'''] # Conditioning layer
+
+        # Unconditional pass for the rest of edges
+        x = self.layer_encode(x, latent=None) # [R, F, T'] --> [R, F, T''] # Conditioning layer
+        x = self.layer1(x, latent=None) # [R, F, T''] --> [R, F, T'''] # Conditioning layer
+
+        # Join all edges with the edge of interest
+        x = (x.reshape(BS, -1, *x.shape[1:]) * (1 - edge_ids)) + (x_sel[:, None] * edge_ids)
+        x = x.mean(-1).flatten(0,1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
+        x = x.reshape(BS, NR, x.size(-1))
+
+        x_skip = x_sel.mean(-1)[:, None] # [F, T'''] --> [1, F] # Temporal Avg pool
 
         if self.factor:
             x = self.edge2node(x, rel_rec, rel_send) # [R, F] --> [N, F] # marshalling
             x = swish(self.mlp2(x)) # [N, F] --> [N, F]
 
             x = self.node2edge(x, rel_rec, rel_send) # [N, F] --> [R, 2F] # marshalling
-            x = torch.cat((x, x_skip), dim=2)  # [R, 2F] --> [R, 3F] # Skip connection
+            x_sel = (x * edge_ids[..., 0]).sum(1, keepdims=True)
+            x = torch.cat((x_sel, x_skip), dim=2)  # [R, 2F] --> [R, 3F] # Skip connection
             x = swish(self.mlp3(x)) # [R, 3F] --> [R, F]
             x = self.layer2(x, latent) # [R, F] --> [R, F] # Conditioning layer
             x = self.layer3(x, latent) # [R, F] --> [R, F] # Conditioning layer
@@ -380,6 +388,7 @@ class EdgeGraphEBM(nn.Module):
 
         return energy
 
+# Support Modules
 class CondResBlock1d(nn.Module):
     def __init__(self, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, latent_grid=False, spectral_norm=False):
         super(CondResBlock1d, self).__init__()
@@ -429,36 +438,43 @@ class CondResBlock1d(nn.Module):
         # TODO: How to properly condition the different objects. Equally? or should we concatenate them.
         x_orig = x
 
-        latent_1 = self.latent_fc1(latent)
-        latent_2 = self.latent_fc2(latent)
+        if latent is not None:
+            latent_1 = self.latent_fc1(latent)
+            latent_2 = self.latent_fc2(latent)
 
-        gain = latent_1[:, :self.filters, None]
-        bias = latent_1[:, self.filters:, None]
+            gain = latent_1[:, :self.filters, None]
+            bias = latent_1[:, self.filters:, None]
 
-        gain2 = latent_2[:, :self.filters, None]
-        bias2 = latent_2[:, self.filters:, None]
+            gain2 = latent_2[:, :self.filters, None]
+            bias2 = latent_2[:, self.filters:, None]
 
-        if latent.size(0) < x.size(0):
+            if latent.size(0) < x.size(0):
 
-            x = self.conv1(x)
-            x = x.reshape(latent.size(0), -1, *x.shape[-2:])
-            x = gain[:, None] * x + bias[:, None]
-            x = swish(x)
+                x = self.conv1(x)
+                x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+                x = gain[:, None] * x + bias[:, None]
+                x = swish(x)
 
-            x = x.flatten(0,1)
-            x = self.conv2(x)
-            x = x.reshape(latent.size(0), -1, *x.shape[-2:])
-            x = gain2[:, None] * x + bias2[:, None]
-            x = swish(x)
-            x = x.flatten(0,1)
+                x = x.flatten(0,1)
+                x = self.conv2(x)
+                x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+                x = gain2[:, None] * x + bias2[:, None]
+                x = swish(x)
+                x = x.flatten(0,1)
+            else:
+                x = self.conv1(x)
+                x = gain * x + bias
+                x = swish(x)
+
+
+                x = self.conv2(x)
+                x = gain2 * x + bias2
+                x = swish(x)
+
         else:
             x = self.conv1(x)
-            x = gain * x + bias
             x = swish(x)
-
-
             x = self.conv2(x)
-            x = gain2 * x + bias2
             x = swish(x)
 
         x_out = x_orig + x
