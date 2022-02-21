@@ -30,7 +30,8 @@ import random
 # from torchvision.utils import make_grid
 # from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
-    linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, normalize_trajectories
+    linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
+    normalize_trajectories, augment_trajectories
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
@@ -221,9 +222,10 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         if FLAGS.num_steps_end != -1 and training_step > 0:
             num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
 
-        ### FEATURE TEST ### varying fixed steps
-        # if random.random() < 0.5:
-        #     num_fixed_timesteps = random.randint(0, num_fixed_timesteps)
+        #### FEATURE TEST ##### varying fixed steps
+        if random.random() < 0.5:
+            num_fixed_timesteps = random.randint(2, num_fixed_timesteps)
+        #### FEATURE TEST #####
 
     if FLAGS.num_fixed_timesteps > 0:
         feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
@@ -261,9 +263,11 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         #     feat_grad = clamp_val * feat_grad / feat_grad_norm
         #### FEATURE TEST #####
 
+        #### FEATURE TEST #####
         # Gradient Dropout - Note: Testing.
         # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
         # feat_grad = feat_grad * update_mask
+        #### FEATURE TEST #####
 
         # KL Term computation ### From Compose visual relations ###
         # Note: TODO: We are doing one unnecessary step here. we could simply compute feat_neg[-1] as feat_neg_kl.
@@ -272,15 +276,10 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
 
             energy = 0
             for j in range(len(latents)):
-                # if idx is not None and idx != j:
-                #     pass
-                # else:
-                # ix = j % FLAGS.components # model[i] = EBMi
                 energy = models[j % FLAGS.components].forward(feat_neg_kl, latents[j]) + energy
             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
-
 
         ## Momentum update
         if FLAGS.momentum > 0:
@@ -360,7 +359,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
 
         ### NOTE: TEST 1: All but 1 latent
-        latents = latents[:-1]
+        # latents = latents[:-1]
         # latents = [latents[1], latents[0], *latents[2:]]
         # latents = latents[:-3]
 
@@ -382,100 +381,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
             logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt', get_trajectory_figure(normalize_trajectories(feat), b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
             print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
         #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
         break
-        # Note: Ask Yilun about all this
-        # feat_neg = feat_neg.detach()
-        # feat_components = []
-        #
-        # if FLAGS.components > 1:
-        #     for i, latent in enumerate(latents):
-        #         feat_init = torch.rand_like(feat)
-        #         latents_select = latents[i:i+1]
-        #         feat_component, _, _, _ = gen_trajectories(latents_select, FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                    create_graph=False)
-        #         feat_components.append(feat_component)
-        #
-        #     feat_init = torch.rand_like(feat)
-        #     latents_perm = [torch.cat([latent[i:], latent[:i]], dim=0) for i, latent in enumerate(latents)]
-        #     feat_neg_perm, _, feat_grad_perm, _ = gen_trajectories(latents_perm, FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                              create_graph=False)
-        #     feat_neg_perm = feat_neg_perm.detach()
-        #     feat_init = torch.rand_like(feat)
-        #     add_latents = list(latents)
-        #     for i in range(FLAGS.num_additional):
-        #         add_latents.append(torch.roll(latents[i], i + 1, 0))
-        #     feat_neg_additional, _, _, _ = gen_trajectories(tuple(add_latents), FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                              create_graph=False)
-        #
-        # feat.requires_grad = True
-        # feat_grads = []
-        #
-        # for i, latent in enumerate(latents):
-        #     if FLAGS.decoder:
-        #         feat_grad = torch.zeros_like(feat)
-        #     else:
-        #         energy_pos = models[i].forward(feat, latents[i])
-        #         feat_grad = torch.autograd.grad([energy_pos.sum()], [feat])[0]
-        #     feat_grads.append(feat_grad)
-        #
-        # feat_grad = torch.stack(feat_grads, dim=1)
-        #
-        # s = feat.size()
-        # feat_size = s[-1]
-        #
-        # feat_grad_dense = feat_grad.view(batch_size, FLAGS.components, 1, -1, 1) # [4, 3, 1, 49152, 1]
-        # feat_grad_min = feat_grad_dense.min(dim=3, keepdim=True)[0]
-        # feat_grad_max = feat_grad_dense.max(dim=3, keepdim=True)[0] # [4, 3, 1, 1, 1]
-        #
-        # feat_grad = (feat_grad - feat_grad_min) / (feat_grad_max - feat_grad_min + 1e-5) # [4, 3, 3, 128, 128]
-
-        # im_grad[:, :, :, :1, :] = 1
-        # im_grad[:, :, :, -1:, :] = 1
-        # im_grad[:, :, :, :, :1] = 1
-        # im_grad[:, :, :, :, -1:] = 1
-        # im_output = im_grad.permute(0, 3, 1, 4, 2).reshape(batch_size * im_size, FLAGS.components * im_size, 3)
-        # im_output = im_output.cpu().detach().numpy() * 100
-        # im_output = (im_output - im_output.min()) / (im_output.max() - im_output.min())
-
-        # feat = feat.cpu().detach().numpy().transpose((0, 2, 3, 1)).reshape(batch_size*im_size, im_size, 3)
-
-        # im_output = np.concatenate([im_output, im], axis=1)
-        # im_output = im_output*255
-        # imwrite("result/%s/s%08d_grad.png" % (FLAGS.exp,step), im_output)
-        #
-        # im_neg = im_neg_tensor = im_neg.detach().cpu()
-        # im_components = [im_components[i].detach().cpu() for i in range(len(im_components))]
-        # im_neg = torch.cat([im_neg] + im_components)
-        # im_neg = np.clip(im_neg, 0.0, 1.0)
-        # im_neg = make_grid(im_neg, nrow=int(im_neg.shape[0] / (FLAGS.components + 1))).permute(1, 2, 0)
-        # im_neg = im_neg.numpy()*255
-        # imwrite("result/%s/s%08d_gen.png" % (FLAGS.exp,step), im_neg)
-        #
-        # if FLAGS.components > 1:
-        #     im_neg_perm = im_neg_perm.detach().cpu()
-        #     im_components_perm = []
-        #     for i,im_component in enumerate(im_components):
-        #         im_components_perm.append(torch.cat([im_component[i:], im_component[:i]]))
-        #     im_neg_perm = torch.cat([im_neg_perm] + im_components_perm)
-        #     im_neg_perm = np.clip(im_neg_perm, 0.0, 1.0)
-        #     im_neg_perm = make_grid(im_neg_perm, nrow=int(im_neg_perm.shape[0] / (FLAGS.components + 1))).permute(1, 2, 0)
-        #     im_neg_perm = im_neg_perm.numpy()*255
-        #     imwrite("result/%s/s%08d_gen_perm.png" % (FLAGS.exp,step), im_neg_perm)
-        #
-        #     im_neg_additional = im_neg_additional.detach().cpu()
-        #     for i in range(FLAGS.num_additional):
-        #         im_components.append(torch.roll(im_components[i], i + 1, 0))
-        #     im_neg_additional = torch.cat([im_neg_additional] + im_components)
-        #     im_neg_additional = np.clip(im_neg_additional, 0.0, 1.0)
-        #     im_neg_additional = make_grid(im_neg_additional,
-        #                         nrow=int(im_neg_additional.shape[0] / (FLAGS.components + FLAGS.num_additional + 1))).permute(1, 2, 0)
-        #     im_neg_additional = im_neg_additional.numpy()*255
-        #     imwrite("result/%s/s%08d_gen_add.png" % (FLAGS.exp,step), im_neg_additional)
     print('test done')
     exit()
 
@@ -499,7 +410,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         edges = edges.to(dev)
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
-        # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
 
         if FLAGS.forecast:
@@ -520,7 +430,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
 
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
-        # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
         if save:
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
@@ -659,7 +568,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
             else: feat_enc = feat
             if FLAGS.normalize_data_latent:
-                feat_enc = normalize_trajectories(feat_enc)
+                feat_enc = normalize_trajectories(feat_enc, augment=True)
             latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
             ## Note: TEST FEATURE: Add noise to input after obtaining latents.
@@ -699,6 +608,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
                 ## Note: Backprop through 1 sampling step
             feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+
             ## Compute losses
             loss = 0
             if FLAGS.autoencode or FLAGS.cd_and_ae:

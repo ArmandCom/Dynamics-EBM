@@ -15,7 +15,7 @@ from PIL import Image
 from torch.nn.utils import spectral_norm
 from torchvision import transforms
 import matplotlib.pyplot as plt
-
+import math
 
 def swish(x):
     return x * torch.sigmoid(x)
@@ -497,17 +497,50 @@ def visualize_trajectories(state, state_gen, edges, savedir=None, b_idx=0):
     # plt.plot(energies)
     # plt.show()
 
-def normalize_trajectories(state):
+def augment_trajectories(locvel, rotation=None):
+    loc, vel = locvel
+    if rotation is not None:
+        if rotation == 'random':
+            rotation = random.random() * math.pi * 2
+        else: raise NotImplementedError
+        loc = rotate(origin=(0,0), points=loc, angle=rotation)
+        vel = rotate(origin=(0,0), points=vel, angle=rotation)
+    return loc, vel
+
+def rotate(origin, points, angle):
+    """
+    Rotate a point counterclockwise by a given angle around a given origin.
+
+    The angle should be given in radians.
+    """
+    ox, oy = origin
+    px, py = points[..., 0:1], points[..., 1:]
+
+    qx = ox + math.cos(angle) * (px - ox) - math.sin(angle) * (py - oy)
+    qy = oy + math.sin(angle) * (px - ox) + math.cos(angle) * (py - oy)
+    return torch.cat([qx, qy], dim=-1)
+
+def normalize_trajectories(state, augment=False):
     '''
     state: [BS, NO, T, XY VxVy]
     '''
+
     loc, vel = state[..., :2], state[..., 2:]
-    loc_max = loc.max()
-    loc_min = loc.min()
-    vel_max = vel.max()
-    vel_min = vel.min() #(dim=-2, keepdims=True)[0]
+
+    if augment:
+        loc, vel = augment_trajectories((loc, vel), 'random')
+    loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
+    loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
+    vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
+    vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
+
+    # loc_max = loc.max()
+    # loc_min = loc.min()
+    # vel_max = vel.max()
+    # vel_min = vel.min() #(dim=-2, keepdims=True)[0]
 
     # Normalize to [-1, 1]
+    # print(loc.shape, loc_min.shape)
     loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
     vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
 
