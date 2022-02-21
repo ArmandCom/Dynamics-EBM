@@ -497,6 +497,23 @@ def visualize_trajectories(state, state_gen, edges, savedir=None, b_idx=0):
     # plt.plot(energies)
     # plt.show()
 
+def normalize_trajectories(state):
+    '''
+    state: [BS, NO, T, XY VxVy]
+    '''
+    loc, vel = state[..., :2], state[..., 2:]
+    loc_max = loc.max()
+    loc_min = loc.min()
+    vel_max = vel.max()
+    vel_min = vel.min() #(dim=-2, keepdims=True)[0]
+
+    # Normalize to [-1, 1]
+    loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+    vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+    state = torch.cat([loc, vel], dim=-1)
+    return state
+
 def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc'):
     fig = plt.figure()
     axes = plt.gca()

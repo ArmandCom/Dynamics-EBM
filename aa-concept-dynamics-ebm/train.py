@@ -233,7 +233,6 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     for i in range(num_steps):
         feat_noise.normal_()
 
-        # Linear annealing: # TODO: Test has been incorrect
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
             step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
@@ -242,17 +241,13 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
         feat_neg = feat_neg + noise_coef * feat_noise
 
-        # Smoothing # TODO: Increase
+        # Smoothing
         if i % 5 == 0 and i < num_steps - 10: # smooth every 10 and leave the last iterations
             feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         energy = 0
         for j in range(len(latents)):
-            # if idx is not None and idx != j:
-            #     pass
-            # else:
-            #     ix = j % FLAGS.components # model[i] = EBMi
             if FLAGS.sample_ema:
                 energy = models_ema[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
             else:
@@ -286,7 +281,6 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
 
-        # feat_neg = feat_neg.detach()
 
         ## Momentum update
         if FLAGS.momentum > 0:
@@ -366,7 +360,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
 
         ### NOTE: TEST 1: All but 1 latent
-        # latents = latents[:-2]
+        latents = latents[:-1]
         # latents = [latents[1], latents[0], *latents[2:]]
         # latents = latents[:-3]
 
@@ -705,7 +699,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
                 ## Note: Backprop through 1 sampling step
             feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-            print('abc')
             ## Compute losses
             loss = 0
             if FLAGS.autoencode or FLAGS.cd_and_ae:
