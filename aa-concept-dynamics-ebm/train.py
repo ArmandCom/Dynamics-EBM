@@ -825,6 +825,7 @@ def main_single(rank, FLAGS):
                           + '_S-LR' + str(FLAGS.step_lr)
                           + '_NS' + str(FLAGS.num_steps)
                           + '_LR' + str(FLAGS.lr)
+                          + '_LDim' + str(FLAGS.latent_dim)
                           + '_KL' + str(int(FLAGS.kl))
                           + '_SM' + str(int(FLAGS.sm))
                           + '_SN' + str(int(FLAGS.spectral_norm))
