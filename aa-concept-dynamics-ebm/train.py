@@ -1,6 +1,6 @@
 import torch
 import time
-from models import TrajEBM, TrajGraphEBM, EdgeGraphEBM #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import TrajGraphEBM, EdgeGraphEBM #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
 # from tensorflow.python.platform import flags
 import numpy as np
@@ -95,11 +95,13 @@ parser.add_argument('--spatial_feat', action='store_true', help='use spatial lat
 parser.add_argument('--dropout', default=0.2, type=float, help='use spatial latents for object segmentation')
 parser.add_argument('--factor_encoder', action='store_true', help='if we use message passing in the encoder')
 parser.add_argument('--normalize_data_latent', action='store_true', help='if we normalize data before encoding the latents')
+parser.add_argument('--obj_id_embedding', action='store_true', help='add object identifier')
 
 # Model specific - TrajEBM
 parser.add_argument('--input_dim', default=4, type=int, help='dimension of an object')
 parser.add_argument('--latent_hidden_dim', default=64, type=int, help='hidden dimension of the latent')
 parser.add_argument('--latent_dim', default=64, type=int, help='dimension of the latent')
+parser.add_argument('--obj_id_dim', default=6, type=int, help='size of the object id embedding')
 parser.add_argument('--num_fixed_timesteps', default=5, type=int, help='constraints')
 parser.add_argument('--num_timesteps', default=19, type=int, help='constraints')
 
@@ -619,6 +621,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
+                print('Using CD!'); exit()
                 energy_poss = []
                 energy_negs = []
                 for i in range(FLAGS.components):
@@ -841,6 +844,7 @@ def main_single(rank, FLAGS):
                           + '_FC' + str(int(FLAGS.forecast))
                           + '_IE' + str(int(FLAGS.independent_energies))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
+                          + '_OID' + str(int(FLAGS.obj_id_embedding))
                           + '_FE' + str(int(FLAGS.factor_encoder))
                           + '_NDL' + str(int(FLAGS.normalize_data_latent))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))

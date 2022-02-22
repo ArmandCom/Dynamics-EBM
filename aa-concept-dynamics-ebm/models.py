@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch
 from easydict import EasyDict
 from downsample import Downsample
+import numpy as np
 import warnings
 from torch.nn.utils import spectral_norm as sn
 from encoder_models import MLPLatentEncoder, CNNLatentEncoder, my_softmax
@@ -24,94 +25,6 @@ def kaiming_init(m):
         if m.bias is not None:
             m.bias.data.fill_(0)
 
-class TrajEBM(nn.Module):
-    def __init__(self, args, dataset):
-
-        # TODO: Node encoding appended to z + encoded in EBM for matching. Explicit matching?
-        super(TrajEBM, self).__init__()
-
-        filter_dim = args.filter_dim
-        self.filter_dim = filter_dim
-        latent_dim_expand = args.latent_dim * args.components
-        latent_dim = args.latent_dim
-        spectral_norm = args.spectral_norm
-
-        self.components = args.components
-
-        # self.conv1 = nn.Conv1d(4, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
-        if spectral_norm:
-            self.conv1 = sn(nn.Conv1d(4 * args.n_objects, filter_dim, kernel_size=5, stride=1, padding=2, bias=True))
-            self.conv2 = sn(nn.Conv1d(filter_dim, filter_dim, kernel_size=5, stride=1, padding=2, bias=True))
-            self.energy_map = sn(nn.Linear(filter_dim, 1))
-        else:
-            self.conv1 = nn.Conv1d(4 * args.n_objects, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
-            self.conv2 = nn.Conv1d(filter_dim, filter_dim, kernel_size=5, stride=1, padding=2, bias=True)
-            self.energy_map = nn.Linear(filter_dim, 1)
-
-        self.layer_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
-        self.layer1 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
-        self.layer2 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
-        self.layer3 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample = False, rescale=False, spectral_norm=spectral_norm)
-
-        self.avg_pool = nn.AvgPool1d(3, stride=2, padding=1)
-
-        # New
-        if args.forecast:
-            timesteps_enc = args.num_fixed_timesteps
-        else: timesteps_enc = args.timesteps
-        # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
-        #                                        do_prob=args.dropout, factor=True)
-        self.latent_encoder = CNNLatentEncoder(args.input_dim, args.latent_hidden_dim, args.latent_dim,
-                                               do_prob=args.dropout, factor=True)
-
-    def embed_latent(self, traj, rel_rec, rel_send):
-        '''
-        im: [24, 3, 64, 64]
-        traj: [B, n_obj, T, dim]
-        '''
-        return self.latent_encoder(traj, rel_rec, rel_send)
-
-    def forward(self, x, latent):
-
-        # TODO: Smoothing trajectory
-
-        # Note: TESTING FEATURE
-        # nodes = x.view(x.size(0), x.size(1), -1)
-        # node_embs = self.latent_encoder.mlp1(nodes).unsqueeze(2)\
-        #     .repeat_interleave(x.shape[2], dim=2)[..., :4]  # 2-layer ELU net per node (we only keep the last N features for matching)
-        # x = torch.cat([x, node_embs], dim=-1)
-
-        # For the first attempt we treat objects jointly. We could also consider to embed the distances in the edges. Or treat it as a graph.
-        x = x.permute(0,1,3,2).flatten(1,2)
-        # x = x.contiguous()
-        # Note: x = inputs.view(inputs.size(0), inputs.size(1), -1)
-
-        # Future work
-        # self.latent_encoder.mlp1(x.) # Canviar in filters de
-
-        inter = self.conv1(x)
-        inter = swish(inter)
-        inter = self.conv2(inter)
-        x = swish(inter)
-
-        # x = self.avg_pool(inter)
-
-        x = self.layer_encode(x, latent)
-
-        # if self.args.self_attn:
-        #     x, _ = self.self_attn(x)
-
-        x = self.layer1(x, latent) # CondResBlock
-        x = self.layer2(x, latent)
-        x = self.layer3(x, latent)
-
-        x = x.mean(dim=2)
-        x = x.view(x.size(0), -1)
-
-        energy = self.energy_map(x)
-
-        return energy
-
 class TrajGraphEBM(nn.Module):
     def __init__(self, args, dataset):
         super(TrajGraphEBM, self).__init__()
@@ -128,7 +41,12 @@ class TrajGraphEBM(nn.Module):
 
         self.factor = True
 
-        state_dim = 4
+        state_dim = args.input_dim
+        self.obj_id_embedding = args.obj_id_embedding
+        if args.obj_id_embedding:
+            state_dim += args.obj_id_dim
+            self.obj_embedding = NodeID(args)
+
         self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
 
         # self.mlp2 = MLPBlock(filter_dim, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
@@ -161,7 +79,7 @@ class TrajGraphEBM(nn.Module):
         else: timesteps_enc = args.timesteps
         # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
         #                                        do_prob=args.dropout, factor=True)
-        self.latent_encoder = CNNLatentEncoder(args.input_dim, args.latent_hidden_dim, args.latent_dim,
+        self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
                                                do_prob=args.dropout, factor=True)
 
         self.rel_rec = None
@@ -170,6 +88,10 @@ class TrajGraphEBM(nn.Module):
     def embed_latent(self, traj, rel_rec, rel_send):
         if self.rel_rec is None and self.rel_send is None:
             self.rel_rec, self.rel_send = rel_rec[0:1], rel_send[0:1]
+
+        if self.obj_id_embedding:
+            traj = self.obj_embedding(traj)
+
         return self.latent_encoder(traj, rel_rec, rel_send)
 
     def init_weights(self):
@@ -215,6 +137,8 @@ class TrajGraphEBM(nn.Module):
 
         rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
         rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
+        if self.obj_id_embedding:
+            inputs = self.obj_embedding(inputs)
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
@@ -258,7 +182,13 @@ class EdgeGraphEBM(nn.Module):
 
         self.factor = True
 
-        state_dim = 4
+        state_dim = args.input_dim
+
+        self.obj_id_embedding = args.obj_id_embedding
+        if args.obj_id_embedding:
+            state_dim += args.obj_id_dim
+            self.obj_embedding = NodeID(args)
+
         self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
 
         # self.mlp2 = MLPBlock(filter_dim, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
@@ -291,7 +221,7 @@ class EdgeGraphEBM(nn.Module):
         else: timesteps_enc = args.timesteps
         # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
         #                                        do_prob=args.dropout, factor=True)
-        self.latent_encoder = CNNLatentEncoder(args.input_dim, args.latent_hidden_dim, args.latent_dim,
+        self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
                                                do_prob=args.dropout, factor=True)
 
         self.rel_rec = None
@@ -302,6 +232,10 @@ class EdgeGraphEBM(nn.Module):
     def embed_latent(self, traj, rel_rec, rel_send):
         if self.rel_rec is None and self.rel_send is None:
             self.rel_rec, self.rel_send = rel_rec[0:1], rel_send[0:1]
+
+        if self.obj_id_embedding:
+            traj = self.obj_embedding(traj)
+
         return self.latent_encoder(traj, rel_rec, rel_send)
 
     def init_weights(self):
@@ -348,6 +282,10 @@ class EdgeGraphEBM(nn.Module):
         rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
         rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
         latent, edge_ids = latent
+
+        if self.obj_id_embedding:
+            inputs = self.obj_embedding(inputs)
+
         BS, NO, _, ND = inputs.shape
         NR = NO * (NO-1)
 
@@ -387,6 +325,21 @@ class EdgeGraphEBM(nn.Module):
         energy = self.energy_map(x) # [F] --> [1] # Project features to scalar
 
         return energy
+
+class NodeID(nn.Module):
+    def __init__(self, args):
+        super(NodeID, self).__init__()
+        self.obj_id_dim = args.obj_id_dim
+        # dim_id = int(np.ceil(np.log2(args.n_objects)))
+        self.index_embedding = nn.Embedding(args.n_objects, args.obj_id_dim)
+        # obj_ids = [torch.tensor(np.array(list(np.binary_repr(i, width=dim_id)), dtype=int)) for i in range(args.n_objects)]
+        # obj_ids = torch.stack(obj_ids)
+        obj_ids = torch.arange(args.n_objects)
+        self.register_buffer('obj_ids', obj_ids, persistent=False)
+
+    def forward(self, states):
+        embeddings = self.index_embedding(self.obj_ids)[None, :, None].expand(*states.shape[:-1], self.obj_id_dim)
+        return torch.cat([states, embeddings], dim=-1)
 
 # Support Modules
 class CondResBlock1d(nn.Module):
