@@ -529,11 +529,14 @@ def normalize_trajectories(state, augment=False):
 
     if augment:
         loc, vel = augment_trajectories((loc, vel), 'random')
+
+    ## Instance normalization
     loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
     loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
     vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
     vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
 
+    ## Batch normalization
     # loc_max = loc.max()
     # loc_min = loc.min()
     # vel_max = vel.max()

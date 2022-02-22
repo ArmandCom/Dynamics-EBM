@@ -36,6 +36,7 @@ from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
 # python train.py --exp=charged --num_steps=2 --num_steps_test 50 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=64 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode
+# python train.py --exp=charged --num_steps=4 --num_steps_test 20 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=60 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode --normalize_data_latent --logname beta.5_randrotation --forecast --num_fixed_timesteps 10
 
 homedir = '/data/Armand/EBM/'
 # port = 6021
@@ -319,10 +320,10 @@ def init_model(FLAGS, device, dataset):
             model = TrajGraphEBM(FLAGS, dataset).to(device)
 
         models = [model for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR , betas=(0.0, 0.9), eps=1e-8
+        optimizers = [Adam(model.parameters(), lr=FLAGS.lr, betas=(0.5, 0.99))] # Note: From CVR ,, betas=(0.5, 0.99)
     else:
         models = [TrajEBM(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # , betas=(0.0, 0.9), eps=1e-8
+        optimizers = [Adam(model.parameters(), lr=FLAGS.lr, betas=(0.5, 0.99)) for model in models]
         # TODO: check if betas are correct.
     return models, optimizers
 
@@ -353,15 +354,21 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc) # We maxmin normalize the batch
+            feat_enc = normalize_trajectories(feat_enc, augment=True) # We maxmin normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
         latents = torch.chunk(latent, FLAGS.components, dim=1)
 
+
+        ### NOTE: TEST: Random rotation of the input trajectory
+        feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
+        # feat = normalize_trajectories(feat)
+
         ### NOTE: TEST 1: All but 1 latent
-        # latents = latents[:-1]
+        # latents = latents[:-2]
         # latents = [latents[1], latents[0], *latents[2:]]
         # latents = latents[:-3]
+        # latents = reversed(latents)
 
         # if FLAGS.independent_energies and FLAGS.autoencode: print('Autoencode is not compatible with EdgeGraphEBM'); exit()
         if FLAGS.independent_energies:
@@ -381,7 +388,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
             logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt', get_trajectory_figure(normalize_trajectories(feat), b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
             print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
@@ -407,10 +414,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
-        edges = edges.to(dev)
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
-        bs = feat.size(0)
 
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
@@ -571,11 +576,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 feat_enc = normalize_trajectories(feat_enc, augment=True)
             latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
-            ## Note: TEST FEATURE: Add noise to input after obtaining latents.
+            #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
             # feat_noise = torch.randn_like(feat).detach()
             # feat_noise.normal_()
             # feat = feat + 0.001 * feat_noise
-            ###
+            #### Note: TEST FEATURE ####
 
             latents = torch.chunk(latent, FLAGS.components, dim=1)
 
