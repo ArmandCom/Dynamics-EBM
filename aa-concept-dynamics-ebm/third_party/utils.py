@@ -497,6 +497,19 @@ def visualize_trajectories(state, state_gen, edges, savedir=None, b_idx=0):
     # plt.plot(energies)
     # plt.show()
 
+def gaussian_kernel(a, b):
+    dim1_1, dim1_2 = a.shape[0], b.shape[0]
+    depth = a.shape[1]
+    a = a.view(dim1_1, 1, depth)
+    b = b.view(1, dim1_2, depth)
+    a_core = a.expand(dim1_1, dim1_2, depth)
+    b_core = b.expand(dim1_1, dim1_2, depth)
+    numerator = (a_core - b_core).pow(2).mean(2)/depth
+    return torch.exp(-numerator)
+# Implemented from: https://github.com/Saswatm123/MMD-VAE
+def MMD(a, b):
+    return gaussian_kernel(a, a).mean() + gaussian_kernel(b, b).mean() - 2*gaussian_kernel(a, b).mean()
+
 def augment_trajectories(locvel, rotation=None):
     loc, vel = locvel
     if rotation is not None:

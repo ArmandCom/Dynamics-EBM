@@ -31,7 +31,7 @@ import random
 # from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
     linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
-    normalize_trajectories, augment_trajectories
+    normalize_trajectories, augment_trajectories, MMD
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
@@ -619,6 +619,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## Compute losses
             loss = 0
+
+            #### TEST FEATURE #### maximize MMD
+            mmd_loss = MMD(latent[:, 0], latent[:, 1])
+
+            #### TEST FEATURE ####
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
