@@ -37,6 +37,7 @@ from pathlib import Path
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
 # python train.py --exp=charged --num_steps=2 --num_steps_test 50 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=64 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode
 # python train.py --exp=charged --num_steps=4 --num_steps_test 20 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=60 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode --normalize_data_latent --logname beta.5_randrotation --forecast --num_fixed_timesteps 10
+# python train.py --exp=charged --num_steps=2 --num_steps_test 4 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 0 --autoencode --normalize_data_latent --logname randrotation_test_objid_smoothin0 --num_fixed_timesteps 5 --obj_id_embedding --independent_energies
 
 homedir = '/data/Armand/EBM/'
 # port = 6021
