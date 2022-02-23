@@ -1,6 +1,6 @@
 import torch
 import time
-from models import TrajGraphEBM, EdgeGraphEBM #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import TrajGraphEBM, EdgeGraphEBM, EdgeGraphEBM_LateFusion #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
 # from tensorflow.python.platform import flags
 import numpy as np
@@ -123,6 +123,7 @@ parser.add_argument('--sample_ema', action='store_true', help='If set to True, w
 parser.add_argument('--replay_batch', action='store_true', help='If set to True, we initialize generation from a buffer.')
 parser.add_argument('--buffer_size', default=10000, type=int, help='Size of the buffer')
 parser.add_argument('--entropy_nn', action='store_true', help='If set to True, we add an entropy component to the loss')
+parser.add_argument('--mmd', action='store_true', help='If set to True, we add a pairwise mmd component to the loss')
 
 parser.add_argument('--step_lr', default=500.0, type=float, help='step size of latents')
 parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
@@ -227,8 +228,8 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
 
         #### FEATURE TEST ##### varying fixed steps
-        if random.random() < 0.5:
-            num_fixed_timesteps = random.randint(2, num_fixed_timesteps)
+        # if random.random() < 0.5:
+        #     num_fixed_timesteps = random.randint(3, num_fixed_timesteps)
         #### FEATURE TEST #####
 
     if FLAGS.num_fixed_timesteps > 0:
@@ -248,7 +249,7 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        if i % 5 == 0 and i < num_steps - 10: # smooth every 10 and leave the last iterations
+        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
             feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
@@ -315,19 +316,14 @@ def sync_model(models): # Q: What is this about?
             dist.broadcast(param.data, 0)
 
 def init_model(FLAGS, device, dataset):
-    if FLAGS.tie_weight:
-        if FLAGS.independent_energies:
-            model = EdgeGraphEBM(FLAGS, dataset).to(device)
-        else:
-            # model = TrajEBM(FLAGS, dataset).to(device)
-            model = TrajGraphEBM(FLAGS, dataset).to(device)
-
-        models = [model for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr, betas=(0.5, 0.99))] # Note: From CVR ,, betas=(0.5, 0.99)
+    if FLAGS.independent_energies:
+        model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
     else:
-        models = [TrajEBM(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
-        optimizers = [Adam(model.parameters(), lr=FLAGS.lr, betas=(0.5, 0.99)) for model in models]
-        # TODO: check if betas are correct.
+        # model = TrajEBM(FLAGS, dataset).to(device)
+        model = TrajGraphEBM(FLAGS, dataset).to(device)
+
+    models = [model for i in range(FLAGS.ensembles)]
+    optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR ,, betas=(0.5, 0.99)
     return models, optimizers
 
 def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
@@ -364,13 +360,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
 
         ### NOTE: TEST: Random rotation of the input trajectory
-        feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
+        # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
         ### NOTE: TEST 1: All but 1 latent
-        # latents = latents[:-2]
-        # latents = [latents[1], latents[0], *latents[2:]]
-        # latents = latents[:-3]
+        # latents = latents[:1]
+        # latents = [latents[0], latents[1], latents[3], latents[2], latents[4], latents[5]]
         # latents = reversed(latents)
 
         # if FLAGS.independent_energies and FLAGS.autoencode: print('Autoencode is not compatible with EdgeGraphEBM'); exit()
@@ -385,7 +380,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
 
         if save:
-            b_idx = 4
+            b_idx = 3
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
@@ -594,7 +589,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             latent_norm = latent.norm()
 
             feat_neg = torch.rand_like(feat) * 2 - 1
-
+            # feat_neg = torch.zeros_like(feat)
             if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
                 replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
                 replay_batch = decompress_x_mod(replay_batch)
@@ -621,28 +616,31 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             loss = 0
 
             #### TEST FEATURE #### maximize MMD
-            mmd_loss = MMD(latent[:, 0], latent[:, 1])
+            if FLAGS.mmd:
+                mmd_loss = MMD(latent)
+                loss = loss - mmd_loss
 
             #### TEST FEATURE ####
-            if FLAGS.autoencode or FLAGS.cd_and_ae:
+            if FLAGS.autoencode: # or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
-            if not FLAGS.autoencode or FLAGS.cd_and_ae:
-                print('Using CD!'); exit()
-                energy_poss = []
-                energy_negs = []
-                for i in range(FLAGS.components):
-                    energy_poss.append(models[i].forward(feat, latents[i])) # Note: Energy function.
-                    energy_negs.append(models[i].forward(feat_neg.detach(), latents[i])) # + 0.001 * feat_noise
-                    # Q: Understand this line.
-
-                ## Contrastive Divergence loss.
-                energy_pos = torch.stack(energy_poss, dim=1)
-                energy_neg = torch.stack(energy_negs, dim=1)
-                ml_loss = (energy_pos - energy_neg).mean()
-
-                ## Energy regularization losses
-                loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
-                loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+            else: print('Using CD!'); exit()
+            # if not FLAGS.autoencode or FLAGS.cd_and_ae:
+            #     print('Using CD!'); exit()
+            #     energy_poss = []
+            #     energy_negs = []
+            #     for i in range(FLAGS.components):
+            #         energy_poss.append(models[i].forward(feat, latents[i])) # Note: Energy function.
+            #         energy_negs.append(models[i].forward(feat_neg.detach(), latents[i])) # + 0.001 * feat_noise
+            #         # Q: Understand this line.
+            #
+            #     ## Contrastive Divergence loss.
+            #     energy_pos = torch.stack(energy_poss, dim=1)
+            #     energy_neg = torch.stack(energy_negs, dim=1)
+            #     ml_loss = (energy_pos - energy_neg).mean()
+            #
+            #     ## Energy regularization losses
+            #     loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
+            #     loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
             ## Add to the replay buffer
             if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
@@ -741,6 +739,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 if FLAGS.kl:
                     kvs['kl_loss'] = loss_kl.mean().item()
+
+                if FLAGS.mmd:
+                    kvs['mmd_loss'] = mmd_loss.mean().item()
+
                 if FLAGS.entropy_nn:
                     kvs['entropy_loss'] = loss_repel.mean().item()
                 if FLAGS.sm:
@@ -851,6 +853,7 @@ def main_single(rank, FLAGS):
                           + '_IE' + str(int(FLAGS.independent_energies))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
                           + '_OID' + str(int(FLAGS.obj_id_embedding))
+                          + '_MMD' + str(int(FLAGS.mmd))
                           + '_FE' + str(int(FLAGS.factor_encoder))
                           + '_NDL' + str(int(FLAGS.normalize_data_latent))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))

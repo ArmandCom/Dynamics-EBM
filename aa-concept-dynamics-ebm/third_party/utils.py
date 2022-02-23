@@ -498,17 +498,26 @@ def visualize_trajectories(state, state_gen, edges, savedir=None, b_idx=0):
     # plt.show()
 
 def gaussian_kernel(a, b):
-    dim1_1, dim1_2 = a.shape[0], b.shape[0]
-    depth = a.shape[1]
-    a = a.view(dim1_1, 1, depth)
-    b = b.view(1, dim1_2, depth)
-    a_core = a.expand(dim1_1, dim1_2, depth)
-    b_core = b.expand(dim1_1, dim1_2, depth)
-    numerator = (a_core - b_core).pow(2).mean(2)/depth
+    # Modification for allowing batch
+    bs = a.shape[0]
+    dim1_1, dim1_2 = a.shape[1], b.shape[1]
+    depth = a.shape[2]
+    a = a.reshape(bs, dim1_1, 1, depth)
+    b = b.reshape(bs, 1, dim1_2, depth)
+    a_core = a.expand(bs, dim1_1, dim1_2, depth)
+    b_core = b.expand(bs, dim1_1, dim1_2, depth)
+    numerator = (a_core - b_core).pow(3).mean(3)/depth
     return torch.exp(-numerator)
+
 # Implemented from: https://github.com/Saswatm123/MMD-VAE
-def MMD(a, b):
+def batch_MMD(a, b):
     return gaussian_kernel(a, a).mean() + gaussian_kernel(b, b).mean() - 2*gaussian_kernel(a, b).mean()
+
+def MMD(latent):
+    ls = latent.shape[1]
+    randperm = (torch.arange(ls) + torch.randint(1, ls, (1,))) % ls
+    latent = latent.permute(1, 0, 2)
+    return batch_MMD(latent[randperm], latent)
 
 def augment_trajectories(locvel, rotation=None):
     loc, vel = locvel
