@@ -1,6 +1,6 @@
 import torch
 import time
-from models import TrajGraphEBM, EdgeGraphEBM, EdgeGraphEBM_LateFusion #LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import EdgeGraphEBM_LateFusion # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
 # from tensorflow.python.platform import flags
 import numpy as np
@@ -195,7 +195,7 @@ def average_gradients(models):
             dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
             param.grad.data /= size
 
-def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
@@ -214,7 +214,6 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
     old_update = 0.0
 
     feat_negs = []
-    # latents = torch.stack(latents, dim=0)
 
     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
@@ -253,12 +252,10 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
             feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
-        energy = 0
-        for j in range(len(latents)):
-            if FLAGS.sample_ema:
-                energy = models_ema[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
-            else:
-                energy = models[j % FLAGS.components].forward(feat_neg, latents[j]) + energy
+        if FLAGS.sample_ema:
+            energy = models_ema[0].forward(feat_neg, latent)
+        else:
+            energy = models[0].forward(feat_neg, latent)
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
 
@@ -278,10 +275,7 @@ def  gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, num_st
         # Note: TODO: We are doing one unnecessary step here. we could simply compute feat_neg[-1] as feat_neg_kl.
         if i == num_steps - 1 and not sample:
             feat_neg_kl = feat_neg
-
-            energy = 0
-            for j in range(len(latents)):
-                energy = models[j % FLAGS.components].forward(feat_neg_kl, latents[j]) + energy
+            energy = models[0].forward(feat_neg_kl, latent)
             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
@@ -316,14 +310,9 @@ def sync_model(models): # Q: What is this about?
             dist.broadcast(param.data, 0)
 
 def init_model(FLAGS, device, dataset):
-    if FLAGS.independent_energies:
-        model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    else:
-        # model = TrajEBM(FLAGS, dataset).to(device)
-        model = TrajGraphEBM(FLAGS, dataset).to(device)
-
+    model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
-    optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR ,, betas=(0.5, 0.99)
+    optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
 def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
@@ -353,40 +342,36 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc, augment=True) # We maxmin normalize the batch
+            feat_enc = normalize_trajectories(feat_enc, augment=False) # We maxmin normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
-
-        latents = torch.chunk(latent, FLAGS.components, dim=1)
-
 
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
         ### NOTE: TEST 1: All but 1 latent
-        # latents = latents[:1]
-        # latents = [latents[0], latents[1], latents[3], latents[2], latents[4], latents[5]]
-        # latents = reversed(latents)
+        ### TODO: Design mask for optimization
+        mask = torch.ones(FLAGS.components).to(dev)
+        # mask[4:] = 0
+        step += 8
+        latent = (latent, mask)
 
-        # if FLAGS.independent_energies and FLAGS.autoencode: print('Autoencode is not compatible with EdgeGraphEBM'); exit()
-        if FLAGS.independent_energies:
-            latents = [(item.squeeze(1), edge_ids[:, eid, :, None, None]) for eid, item in enumerate(latents)]
-        else: latents = [item.squeeze(1) for item in latents]
 
         feat_neg = torch.rand_like(feat) * 2 - 1
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
+        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
                                                                        create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
-
         if save:
             b_idx = 3
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step)
+            limneg = 0.5
+            limpos = 0.5
+            logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
             print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
@@ -422,16 +407,9 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             feat_enc = normalize_trajectories(feat_enc)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
-        latents = torch.chunk(latent, FLAGS.components, dim=1)
-
-        # if FLAGS.independent_energies and FLAGS.autoencode: print('Autoencode is not compatible with EdgeGraphEBM'); exit()
-        if FLAGS.independent_energies:
-            latents = [(item.squeeze(1), edge_ids[:, eid, :, None, None]) for eid, item in enumerate(latents)]
-        else: latents = [item.squeeze(1) for item in latents]
-
         feat_neg = torch.rand_like(feat) * 2 - 1
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
 
         if save:
@@ -444,96 +422,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-
-
-        # Note: Ask Yilun about all this
-        # feat_neg = feat_neg.detach()
-        # feat_components = []
-        #
-        # if FLAGS.components > 1:
-        #     for i, latent in enumerate(latents):
-        #         feat_init = torch.rand_like(feat)
-        #         latents_select = latents[i:i+1]
-        #         feat_component, _, _, _ = gen_trajectories(latents_select, FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                    create_graph=False)
-        #         feat_components.append(feat_component)
-        #
-        #     feat_init = torch.rand_like(feat)
-        #     latents_perm = [torch.cat([latent[i:], latent[:i]], dim=0) for i, latent in enumerate(latents)]
-        #     feat_neg_perm, _, feat_grad_perm, _ = gen_trajectories(latents_perm, FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                              create_graph=False)
-        #     feat_neg_perm = feat_neg_perm.detach()
-        #     feat_init = torch.rand_like(feat)
-        #     add_latents = list(latents)
-        #     for i in range(FLAGS.num_additional):
-        #         add_latents.append(torch.roll(latents[i], i + 1, 0))
-        #     feat_neg_additional, _, _, _ = gen_trajectories(tuple(add_latents), FLAGS, models, feat_init, feat, FLAGS.num_steps, sample=FLAGS.sample,
-        #                                              create_graph=False)
-        #
-        # feat.requires_grad = True
-        # feat_grads = []
-        #
-        # for i, latent in enumerate(latents):
-        #     if FLAGS.decoder:
-        #         feat_grad = torch.zeros_like(feat)
-        #     else:
-        #         energy_pos = models[i].forward(feat, latents[i])
-        #         feat_grad = torch.autograd.grad([energy_pos.sum()], [feat])[0]
-        #     feat_grads.append(feat_grad)
-        #
-        # feat_grad = torch.stack(feat_grads, dim=1)
-        #
-        # s = feat.size()
-        # feat_size = s[-1]
-        #
-        # feat_grad_dense = feat_grad.view(batch_size, FLAGS.components, 1, -1, 1) # [4, 3, 1, 49152, 1]
-        # feat_grad_min = feat_grad_dense.min(dim=3, keepdim=True)[0]
-        # feat_grad_max = feat_grad_dense.max(dim=3, keepdim=True)[0] # [4, 3, 1, 1, 1]
-        #
-        # feat_grad = (feat_grad - feat_grad_min) / (feat_grad_max - feat_grad_min + 1e-5) # [4, 3, 3, 128, 128]
-
-        # im_grad[:, :, :, :1, :] = 1
-        # im_grad[:, :, :, -1:, :] = 1
-        # im_grad[:, :, :, :, :1] = 1
-        # im_grad[:, :, :, :, -1:] = 1
-        # im_output = im_grad.permute(0, 3, 1, 4, 2).reshape(batch_size * im_size, FLAGS.components * im_size, 3)
-        # im_output = im_output.cpu().detach().numpy() * 100
-        # im_output = (im_output - im_output.min()) / (im_output.max() - im_output.min())
-
-        # feat = feat.cpu().detach().numpy().transpose((0, 2, 3, 1)).reshape(batch_size*im_size, im_size, 3)
-
-        # im_output = np.concatenate([im_output, im], axis=1)
-        # im_output = im_output*255
-        # imwrite("result/%s/s%08d_grad.png" % (FLAGS.exp,step), im_output)
-        #
-        # im_neg = im_neg_tensor = im_neg.detach().cpu()
-        # im_components = [im_components[i].detach().cpu() for i in range(len(im_components))]
-        # im_neg = torch.cat([im_neg] + im_components)
-        # im_neg = np.clip(im_neg, 0.0, 1.0)
-        # im_neg = make_grid(im_neg, nrow=int(im_neg.shape[0] / (FLAGS.components + 1))).permute(1, 2, 0)
-        # im_neg = im_neg.numpy()*255
-        # imwrite("result/%s/s%08d_gen.png" % (FLAGS.exp,step), im_neg)
-        #
-        # if FLAGS.components > 1:
-        #     im_neg_perm = im_neg_perm.detach().cpu()
-        #     im_components_perm = []
-        #     for i,im_component in enumerate(im_components):
-        #         im_components_perm.append(torch.cat([im_component[i:], im_component[:i]]))
-        #     im_neg_perm = torch.cat([im_neg_perm] + im_components_perm)
-        #     im_neg_perm = np.clip(im_neg_perm, 0.0, 1.0)
-        #     im_neg_perm = make_grid(im_neg_perm, nrow=int(im_neg_perm.shape[0] / (FLAGS.components + 1))).permute(1, 2, 0)
-        #     im_neg_perm = im_neg_perm.numpy()*255
-        #     imwrite("result/%s/s%08d_gen_perm.png" % (FLAGS.exp,step), im_neg_perm)
-        #
-        #     im_neg_additional = im_neg_additional.detach().cpu()
-        #     for i in range(FLAGS.num_additional):
-        #         im_components.append(torch.roll(im_components[i], i + 1, 0))
-        #     im_neg_additional = torch.cat([im_neg_additional] + im_components)
-        #     im_neg_additional = np.clip(im_neg_additional, 0.0, 1.0)
-        #     im_neg_additional = make_grid(im_neg_additional,
-        #                         nrow=int(im_neg_additional.shape[0] / (FLAGS.components + FLAGS.num_additional + 1))).permute(1, 2, 0)
-        #     im_neg_additional = im_neg_additional.numpy()*255
-        #     imwrite("result/%s/s%08d_gen_add.png" % (FLAGS.exp,step), im_neg_additional)
 
         break
 
@@ -580,31 +468,22 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # feat = feat + 0.001 * feat_noise
             #### Note: TEST FEATURE ####
 
-            latents = torch.chunk(latent, FLAGS.components, dim=1)
-
-            # if FLAGS.independent_energies and FLAGS.autoencode: print('Autoencode is not compatible with EdgeGraphEBM'); exit()
-            if FLAGS.independent_energies:
-                latents = [(item.squeeze(1), edge_ids[:, eid, :, None, None]) for eid, item in enumerate(latents)]
-            else: latents = [item.squeeze(1) for item in latents]
             latent_norm = latent.norm()
 
             feat_neg = torch.rand_like(feat) * 2 - 1
-            # feat_neg = torch.zeros_like(feat)
+
             if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
                 replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
                 replay_batch = decompress_x_mod(replay_batch)
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latents, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
-            feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
+            feat_negs = torch.stack(feat_negs, dim=1)
 
             # if FLAGS.scheduler:
             #     scheduler.step()
-
-            # Note: Supervise with accumulated velocity
-            # feat_neg_kl = accumulate_traj(feat_neg_kl)
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
@@ -621,26 +500,21 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 loss = loss - mmd_loss
 
             #### TEST FEATURE ####
-            if FLAGS.autoencode: # or FLAGS.cd_and_ae:
+            if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
-            else: print('Using CD!'); exit()
-            # if not FLAGS.autoencode or FLAGS.cd_and_ae:
-            #     print('Using CD!'); exit()
-            #     energy_poss = []
-            #     energy_negs = []
-            #     for i in range(FLAGS.components):
-            #         energy_poss.append(models[i].forward(feat, latents[i])) # Note: Energy function.
-            #         energy_negs.append(models[i].forward(feat_neg.detach(), latents[i])) # + 0.001 * feat_noise
-            #         # Q: Understand this line.
-            #
-            #     ## Contrastive Divergence loss.
-            #     energy_pos = torch.stack(energy_poss, dim=1)
-            #     energy_neg = torch.stack(energy_negs, dim=1)
-            #     ml_loss = (energy_pos - energy_neg).mean()
-            #
-            #     ## Energy regularization losses
-            #     loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
-            #     loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+            if not FLAGS.autoencode or FLAGS.cd_and_ae:
+                print('Using CD!'); exit()
+                energy_poss = []
+                energy_negs = []
+                energy_pos = models[0].forward(feat, latent)
+                energy_neg  = models[0].forward(feat_neg.detach(), latent)
+
+                ## Contrastive Divergence loss.
+                ml_loss = (energy_pos - energy_neg).mean()
+
+                ## Energy regularization losses
+                loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
+                loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
             ## Add to the replay buffer
             if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
@@ -658,14 +532,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## KL loss
             if FLAGS.kl:
-                # raise NotImplementedError
-                # ix = random.randint(0, len(models) - 1)
-                loss_kl = 0
-                for i in range(FLAGS.components):
-                    model = models[i]
-                    model.requires_grad_(False)
-                    loss_kl = loss_kl + model.forward(feat_neg_kl, latents[i]) # Note: Energy function.
-                    model.requires_grad_(True)
+                model = models[0]
+                model.requires_grad_(False)
+                loss_kl = model.forward(feat_neg_kl, latent)
+                model.requires_grad_(True)
                 loss = loss + FLAGS.kl_coeff * loss_kl.mean()
 
                 if FLAGS.entropy_nn:
@@ -708,7 +578,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             [optimizer.zero_grad() for optimizer in optimizers]
 
             if FLAGS.sample_ema:
-                ema_model(models, models_ema, mu=0.9)
+                ema_model(models, models_ema, mu=0.99)
 
             losses.append(loss.item())
             l2_losses.append(feat_loss.item())
@@ -822,20 +692,14 @@ def main_single(rank, FLAGS):
 
     # p = random.randint(0, 9)
     if world_size > 1:
-        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(FLAGS.port), world_size=world_size, rank=rank_idx, group_name="default") # ,
-        # while True:
-        #     try:
-        #         print('Trying port {}'.format(port))
-        #         group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(port), world_size=world_size, rank=rank_idx, group_name="default") # ,
-        #         break
-        #     except: port += 1; print('Exception'); pass
+        group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(FLAGS.port), world_size=world_size, rank=rank_idx, group_name="default")
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
 
     if FLAGS.logname == 'debug':
         logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
     else:
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp,
+        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint',
                             'NO' +str(FLAGS.n_objects)
                           + '_BS' + str(FLAGS.batch_size)
                           + '_S-LR' + str(FLAGS.step_lr)
@@ -850,7 +714,6 @@ def main_single(rank, FLAGS):
                           + '_RB' + str(int(FLAGS.replay_batch))
                           + '_AE' + str(int(FLAGS.autoencode))
                           + '_FC' + str(int(FLAGS.forecast))
-                          + '_IE' + str(int(FLAGS.independent_energies))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
                           + '_OID' + str(int(FLAGS.obj_id_embedding))
                           + '_MMD' + str(int(FLAGS.mmd))
@@ -950,7 +813,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = FLAGS.components
+    FLAGS.ensembles = 1
     FLAGS.tie_weight = True
     FLAGS.sample = True
 
