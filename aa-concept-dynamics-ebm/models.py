@@ -176,7 +176,9 @@ class EdgeGraphEBM_LateFusion(nn.Module):
         energy = self.energy_map(x).squeeze(-1) # [R, F] --> [R, 1] # Project features to scalar
 
         if mask is not None:
-            energy = energy * mask[None, :]
+            if len(mask.shape) < 2:
+                mask = mask[None, :]
+            energy = energy * mask
 
         return energy
 

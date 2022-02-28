@@ -513,9 +513,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
-                # print('Using CD!'); exit()
-                # energy_poss = []
-                # energy_negs = []
+
+                # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+                # latent = (latent, mask)
                 energy_pos = models[0].forward(feat, latent)
                 energy_neg  = models[0].forward(feat_neg.detach(), latent)
 
