@@ -252,10 +252,14 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
             feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
-        if FLAGS.sample_ema:
-            energy = models_ema[0].forward(feat_neg, latent)
-        else:
-            energy = models[0].forward(feat_neg, latent)
+        latent_ii, mask = latent
+        energy = 0
+        for ii in range(2):
+            if ii == 1: latent = (latent_ii, 1 - mask)
+            if FLAGS.sample_ema:
+                energy = models_ema[ii].forward(feat_neg, latent) + energy
+            else:
+                energy = models[ii].forward(feat_neg, latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
 
@@ -272,10 +276,11 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         #### FEATURE TEST #####
 
         # KL Term computation ### From Compose visual relations ###
-        # Note: TODO: We are doing one unnecessary step here. we could simply compute feat_neg[-1] as feat_neg_kl.
-        if i == num_steps - 1 and not sample:
+        # Note: TODO: Review this approach
+        if i == num_steps - 1 and not sample and FLAGS.kl:
             feat_neg_kl = feat_neg
-            energy = models[0].forward(feat_neg_kl, latent)
+            rand_idx = torch.randint(2, (1,))
+            energy = models[rand_idx].forward(feat_neg_kl, latent)
             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
@@ -289,7 +294,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
             feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] # GD computation
 
 
-        if num_fixed_timesteps > 0: # TODO: Check if this works for num_fixed_timesteps = 0
+        if num_fixed_timesteps > 0:
             feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
                                   feat_neg], dim=2)
 
@@ -350,7 +355,6 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # feat = normalize_trajectories(feat)
 
         ### NOTE: TEST 1: All but 1 latent
-        ### TODO: Design mask for optimization
         mask = torch.ones(FLAGS.components).to(dev)
         # mask[:-2] *= 2
         # step += 8
@@ -419,6 +423,9 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
 
         feat_neg = torch.rand_like(feat) * 2 - 1
 
+        mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+        latent = (latent, mask)
+
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
 
@@ -461,7 +468,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
             feat = feat.to(dev)
-            edges = edges.to(dev)
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
 
@@ -470,7 +476,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             else: feat_enc = feat
             if FLAGS.normalize_data_latent:
                 feat_enc = normalize_trajectories(feat_enc, augment=True)
-            latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
+
+            rand_idx = torch.randint(2, (1,))
+            latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
 
             #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
             # feat_noise = torch.randn_like(feat).detach()
@@ -488,6 +496,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
 
+            mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+            latent = (latent, mask)
             feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
             feat_negs = torch.stack(feat_negs, dim=1)
@@ -497,9 +507,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
-            # feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
                 ## Note: Backprop through 1 sampling step
-            feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            # feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
 
             ## Compute losses
             loss = 0
@@ -516,8 +526,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
                 # latent = (latent, mask)
-                energy_pos = models[0].forward(feat, latent)
-                energy_neg  = models[0].forward(feat_neg.detach(), latent)
+
+                rand_idx_cd = torch.randint(2, (1,)) # TODO: Check correctness
+                energy_pos = models[rand_idx_cd].forward(feat, latent[0])
+                energy_neg  = models[rand_idx_cd].forward(feat_neg.detach(), latent[0])
 
                 ## Contrastive Divergence loss.
                 ml_loss = (energy_pos - energy_neg).mean()
@@ -542,9 +554,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## KL loss
             if FLAGS.kl:
-                model = models[0]
+                model = models[rand_idx_cd]
                 model.requires_grad_(False)
-                loss_kl = model.forward(feat_neg_kl, latent)
+                loss_kl = model.forward(feat_neg_kl, latent[0])
                 model.requires_grad_(True)
                 loss = loss + FLAGS.kl_coeff * loss_kl.mean()
 
@@ -709,7 +721,7 @@ def main_single(rank, FLAGS):
     if FLAGS.logname == 'debug':
         logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
     else:
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint',
+        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint-split',
                             'NO' +str(FLAGS.n_objects)
                           + '_BS' + str(FLAGS.batch_size)
                           + '_S-LR' + str(FLAGS.step_lr)
@@ -825,7 +837,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 1
+    FLAGS.ensembles = 2
     FLAGS.tie_weight = True
     FLAGS.sample = True
 
