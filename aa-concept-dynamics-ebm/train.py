@@ -11,6 +11,7 @@ from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 # from easydict import EasyDict
@@ -317,7 +318,7 @@ def sync_model(models): # Q: What is this about?
 def init_model(FLAGS, device, dataset):
     model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
-    optimizers = [Adam(model.parameters(), lr=FLAGS.lr)] # Note: From CVR , betas=(0.5, 0.99)
+    optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
 def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
@@ -449,6 +450,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
     grad_norm_ema = None
+    schedulers = [StepLR(optimizer, step_size=80000, gamma=0.1) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if FLAGS.replay_batch or FLAGS.entropy_nn:
@@ -598,6 +600,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             [optimizer.step() for optimizer in optimizers]
             [optimizer.zero_grad() for optimizer in optimizers]
+            [scheduler.step() for scheduler in schedulers]
 
             if FLAGS.sample_ema:
                 ema_model(models, models_ema, mu=0.99)
