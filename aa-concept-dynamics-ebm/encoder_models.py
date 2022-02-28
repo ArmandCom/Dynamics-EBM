@@ -83,18 +83,18 @@ class CNN(nn.Module):
 	def forward(self, inputs):
 		# Input shape: [num_sims * num_edges, num_dims, num_timesteps]
 
-		x = F.relu(self.conv1(inputs))
+		x = F.elu(self.conv1(inputs))
 		# x = self.bn1(x)
 		x = F.dropout(x, self.dropout_prob, training=self.training)
 		# x = self.pool(x)
-		x = F.relu(self.conv2(x))
+		x = F.elu(self.conv2(x))
 		# x = self.bn2(x)
 		pred = self.conv_predict(x)
 
-		attention = my_softmax(self.conv_attention(x), axis=2)
-		edge_prob = (pred * attention).mean(dim=2)
+		# attention = my_softmax(self.conv_attention(x), axis=2)
+		# edge_prob = (pred * attention).mean(dim=2)
 
-		# edge_prob = pred.mean(dim=2)
+		edge_prob = pred.mean(dim=2)
 		return edge_prob
 
 class MLPLatentEncoder(nn.Module):

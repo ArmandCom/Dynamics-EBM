@@ -93,7 +93,7 @@ parser.add_argument('--tie_weight', action='store_true', help='tie the weights b
 parser.add_argument('--optimize_mask', action='store_true', help='also optimize a segmentation mask over image')
 parser.add_argument('--pos_embed', action='store_true', help='add a positional embedding to model')
 parser.add_argument('--spatial_feat', action='store_true', help='use spatial latents for object segmentation')
-parser.add_argument('--dropout', default=0.2, type=float, help='use spatial latents for object segmentation')
+parser.add_argument('--dropout', default=0.1, type=float, help='use spatial latents for object segmentation')
 parser.add_argument('--factor_encoder', action='store_true', help='if we use message passing in the encoder')
 parser.add_argument('--normalize_data_latent', action='store_true', help='if we normalize data before encoding the latents')
 parser.add_argument('--obj_id_embedding', action='store_true', help='add object identifier')
