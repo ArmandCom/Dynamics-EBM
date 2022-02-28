@@ -498,7 +498,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
 
-            mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+            mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
             feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
