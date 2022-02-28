@@ -38,7 +38,7 @@ from pathlib import Path
 # python train.py --exp=charged --num_steps=2 --num_steps_test 50 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=64 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode
 # python train.py --exp=charged --num_steps=4 --num_steps_test 20 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=60 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode --normalize_data_latent --logname beta.5_randrotation --forecast --num_fixed_timesteps 10
 # python train.py --exp=charged --num_steps=2 --num_steps_test 4 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 0 --autoencode --normalize_data_latent --logname randrotation_test_objid_smoothin0 --num_fixed_timesteps 5 --obj_id_embedding --independent_energies
-
+#  python train.py --exp=charged --num_steps=60 --num_steps_test 60 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --data_workers=4 --gpus=1 --gpu_rank 0 --normalize_data_latent --num_fixed_timesteps 1 --obj_id_embedding --spectral_norm --resume_iter 102000 --resume_name joint/NO3_BS24_S-LR10.0_NS25_LR0.0003_LDim32_KL0_SM0_SN1_Mom0.0_EMA0_RB0_AE0_FC0_CDAE0_OID1_MMD0_FE0_NDL1_SeqL19_FSeqL1
 homedir = '/data/Armand/EBM/'
 # port = 6021
 
@@ -352,10 +352,18 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         ### NOTE: TEST 1: All but 1 latent
         ### TODO: Design mask for optimization
         mask = torch.ones(FLAGS.components).to(dev)
-        # mask[4:] = 0
-        step += 8
-        latent = (latent, mask)
+        # mask[:-2] *= 2
+        # step += 8
 
+        # latent = latent[:]
+        # cyc_perm = (torch.arange(bs) + 1) % bs
+        # latent_old = latent
+        b_idx_ref = 12
+        latent = torch.cat([latent[:, :3], latent[b_idx_ref:b_idx_ref+1, 3:].repeat(bs, 1, 1)], dim=1)
+        # latent = latent[cyc_perm]
+        # print((latent - latent_old).norm())
+        latent = latent[b_idx_ref:b_idx_ref+1].repeat(bs, 1, 1)
+        latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
 
@@ -363,15 +371,17 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                                                                        create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
-            b_idx = 3
+            b_idx = 8
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            limneg = 0.5
-            limpos = 0.5
+            limpos = 1
+            limneg = 1
+
             logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
             print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
@@ -503,9 +513,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
-                print('Using CD!'); exit()
-                energy_poss = []
-                energy_negs = []
+                # print('Using CD!'); exit()
+                # energy_poss = []
+                # energy_negs = []
                 energy_pos = models[0].forward(feat, latent)
                 energy_neg  = models[0].forward(feat_neg.detach(), latent)
 
@@ -733,6 +743,8 @@ def main_single(rank, FLAGS):
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         FLAGS = checkpoint['FLAGS']
+
+        # logdir += '_FSeqL0_RB1' # TODO: remove
 
         FLAGS.normalize_data_latent = FLAGS_OLD.normalize_data_latent # Maybe we shouldn't override
         FLAGS.factor_encoder = FLAGS_OLD.factor_encoder

@@ -153,28 +153,27 @@ class EdgeGraphEBM_LateFusion(nn.Module):
         x = swish(self.cnn(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
 
         # Unconditional pass for the rest of edges
-        x = self.layer_cnn_encode(x, latent=None) # [R, F, T'] --> [R, F, T''] # Conditioning layer
-        x = self.layer1_cnn(x, latent=None) # [R, F, T'] --> [R, F, T''] # Conditioning layer
+        x = self.layer_cnn_encode(x, latent=None) # [R, F, T'] --> [R, F, T'']
+        x = self.layer1_cnn(x, latent=None) # [R, F, T'] --> [R, F, T'']
 
         # Join all edges with the edge of interest
         x = x.mean(-1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
         x = x.reshape(BS, NR, x.size(-1))
 
-        x_skip = x # x_sel.mean(-1)[:, None] # [F, T'''] --> [1, F] # Temporal Avg pool
+        x_skip = x
 
         x = self.edge2node(x, rel_rec, rel_send) # [R, F] --> [N, F] # marshalling
         x = swish(self.mlp2(x)) # [N, F] --> [N, F]
 
         x = self.node2edge(x, rel_rec, rel_send) # [N, F] --> [R, 2F] # marshalling
         x = torch.cat((x, x_skip), dim=2)  # [R, 2F] --> [R, 3F] # Skip connection
-        # x_sel = (x * edge_ids[..., 0]).sum(1, keepdims=True)
         x = swish(self.mlp3(x)) # [R, 3F] --> [R, F]
 
         x = self.layer1(x, latent) # [R, F] --> [R, F] # Conditioning layer
         x = self.layer2(x, latent) # [R, F] --> [R, F] # Conditioning layer
         x = self.layer3(x, latent) # [R, F] --> [R, F] # Conditioning layer
 
-        energy = self.energy_map(x).squeeze(-1) # [F] --> [1] # Project features to scalar
+        energy = self.energy_map(x).squeeze(-1) # [R, F] --> [R, 1] # Project features to scalar
 
         if mask is not None:
             energy = energy * mask[None, :]
