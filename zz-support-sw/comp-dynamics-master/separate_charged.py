@@ -122,7 +122,11 @@ class Trajectory_Data(Dataset):
 
     def __getitem__(self, index):
         rem = index % self.scale
-        l = to_tensor(self.loc[int(index/self.scale),2*(rem%self.n):2*(rem%self.n)+2,int(rem/self.n):int(rem/self.n)+(self.length*self.dist):self.dist]).to(device)
+        l = to_tensor(self.loc
+                      [int(index/self.scale),
+                      2*(rem%self.n):2*(rem%self.n)+2,
+                      int(rem/self.n):int(rem/self.n)+(self.length*self.dist):self.dist]
+                      ).to(device)
         v = to_tensor(self.vel[int(index/self.scale),2*(rem%self.n):2*(rem%self.n)+2,int(rem/self.n):int(rem/self.n)+(self.length*self.dist):self.dist]).to(device)
         return torch.cat((l, v), 0)
 
