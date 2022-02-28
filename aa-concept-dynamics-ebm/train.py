@@ -40,6 +40,8 @@ from pathlib import Path
 # python train.py --exp=charged --num_steps=4 --num_steps_test 20 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=60 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode --normalize_data_latent --logname beta.5_randrotation --forecast --num_fixed_timesteps 10
 # python train.py --exp=charged --num_steps=2 --num_steps_test 4 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 0 --autoencode --normalize_data_latent --logname randrotation_test_objid_smoothin0 --num_fixed_timesteps 5 --obj_id_embedding --independent_energies
 #  python train.py --exp=charged --num_steps=60 --num_steps_test 60 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --data_workers=4 --gpus=1 --gpu_rank 0 --normalize_data_latent --num_fixed_timesteps 1 --obj_id_embedding --spectral_norm --resume_iter 102000 --resume_name joint/NO3_BS24_S-LR10.0_NS25_LR0.0003_LDim32_KL0_SM0_SN1_Mom0.0_EMA0_RB0_AE0_FC0_CDAE0_OID1_MMD0_FE0_NDL1_SeqL19_FSeqL1
+
+#  python train.py --exp=charged --num_steps 10 --num_steps_test 200 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --autoencode --data_workers=4 --gpus=1 --normalize_data_latent --num_fixed_timesteps 1 --logname two_resolutions --gpu_rank 0 --factor
 homedir = '/data/Armand/EBM/'
 # port = 6021
 
@@ -292,6 +294,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
             feat_var = feat_neg[:, :,  num_fixed_timesteps:]
             feat_neg = torch.cat([feat_fixed,
                                   feat_var], dim=2)
+
         else: feat_var = feat_neg
 
         ## Step - LR
@@ -319,7 +322,6 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_var], create_graph=create_graph)
         # feat_grad_2, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph) # Note: Only to evaluate expression
-        # feat_grad_3, = torch.autograd.grad([energy.sum()], [feat_var], create_graph=create_graph) # Note: Only to evaluate expression
 
         # TODO: Calculate grads without taking into account the fixed points.
 
@@ -691,7 +693,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # if not grad_norm_ema:
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
-            # [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) for model in models] # Note: Takes very long in debug
+            [torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) for model in models]
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
             if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
