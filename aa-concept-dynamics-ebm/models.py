@@ -182,6 +182,276 @@ class EdgeGraphEBM_LateFusion(nn.Module):
 
         return energy
 
+class EdgeGraphEBM_OneStep(nn.Module):
+    def __init__(self, args, dataset):
+        super(EdgeGraphEBM_OneStep, self).__init__()
+        do_prob = args.dropout
+        self.dropout_prob = do_prob
+
+        filter_dim = args.filter_dim
+        self.filter_dim = filter_dim
+        latent_dim = args.latent_dim
+        spectral_norm = args.spectral_norm
+
+        self.factor = True
+        self.num_time_instances = 3
+        state_dim = args.input_dim
+
+        self.obj_id_embedding = args.obj_id_embedding
+        if args.obj_id_embedding:
+            state_dim += args.obj_id_dim
+            self.obj_embedding = NodeID(args)
+
+        # self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+
+        self.mlp1 = MLPBlock(state_dim * 2 * self.num_time_instances, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+        # self.mlp3 = MLPBlock(filter_dim * 3, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+
+        if spectral_norm:
+            self.energy_map = sn(nn.Linear(filter_dim, 1))
+            self.mlp2 = sn(nn.Linear(filter_dim, filter_dim))
+            self.mlp3 = sn(nn.Linear(filter_dim * 3, filter_dim))
+        else:
+            self.energy_map = nn.Linear(filter_dim, 1)
+            self.mlp2 = nn.Linear(filter_dim, filter_dim)
+            self.mlp3 = nn.Linear(filter_dim * 3, filter_dim)
+
+        # self.layer_cnn_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
+        # self.layer1_cnn = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
+
+        self.layer1 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
+        self.layer2 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
+        self.layer3 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
+
+        if self.factor:
+            print("Using factor graph CNN encoder.")
+        else:
+            print("Using CNN encoder.")
+
+        self.init_weights()
+
+        # New
+        if args.forecast:
+            timesteps_enc = args.num_fixed_timesteps
+        else: timesteps_enc = args.timesteps
+        # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
+        #                                        do_prob=args.dropout, factor=True)
+        self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
+                                               do_prob=args.dropout, factor=True)
+
+        self.rel_rec = None
+        self.rel_send = None
+
+    def embed_latent(self, traj, rel_rec, rel_send):
+        if self.rel_rec is None and self.rel_send is None:
+            self.rel_rec, self.rel_send = rel_rec[0:1], rel_send[0:1]
+
+        if self.obj_id_embedding:
+            traj = self.obj_embedding(traj)
+
+        return self.latent_encoder(traj, rel_rec, rel_send)
+
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal(m.weight.data)
+                m.bias.data.fill_(0.1)
+
+    def node2edge_temporal(self, inputs, rel_rec, rel_send):
+        # NOTE: Assumes that we have the same graph across all samples.
+
+        x = inputs.reshape(inputs.size(0), inputs.size(1), -1)
+
+        receivers = torch.matmul(rel_rec, x)
+        receivers = receivers.reshape(inputs.size(0) * receivers.size(1),
+                                      inputs.size(2), inputs.size(3))
+        receivers = receivers.transpose(2, 1)
+
+        senders = torch.matmul(rel_send, x)
+        senders = senders.reshape(inputs.size(0) * senders.size(1),
+                                  inputs.size(2),
+                                  inputs.size(3))
+        senders = senders.transpose(2, 1)
+
+        # receivers and senders have shape:
+        # [num_sims * num_edges, num_dims, num_timesteps]
+        edges = torch.cat([senders, receivers], dim=1)
+        return edges
+
+    def edge2node(self, x, rel_rec, rel_send):
+        # NOTE: Assumes that we have the same graph across all samples.
+        incoming = torch.matmul(rel_rec.transpose(2, 1), x)
+        return incoming / incoming.size(1)
+
+    def node2edge(self, x, rel_rec, rel_send):
+        # NOTE: Assumes that we have the same graph across all samples.
+        receivers = torch.matmul(rel_rec, x)
+        senders = torch.matmul(rel_send, x)
+        edges = torch.cat([senders, receivers], dim=2)
+        return edges
+
+    def forward(self, inputs, latent):
+
+        rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
+        rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
+
+        inputs = inputs.unfold(-2, self.num_time_instances, 1).permute(0, 2, 1, -1, 3)
+        # [BS][N, T, F] --> [BS * NC (num chunks)][N, T', ND]
+        BS, NC, NO, NTI, ND = inputs.shape
+        NR = NO * (NO - 1)
+        inputs = inputs.flatten(0, 1)
+
+        if self.obj_id_embedding:
+            inputs = self.obj_embedding(inputs)
+            ND = inputs.shape[-1]
+
+        if isinstance(latent, tuple):
+            latent, mask = latent
+        else: mask = None
+
+        # NTI: number of time instances
+
+        # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
+        edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
+        x = swish(self.mlp1(edges.reshape(BS, NC*NR, -1))).reshape(BS, NC, NR, -1)  # [R, 8 * NTI] --> [R, F] # CNN layers
+
+        # Unconditional pass for the rest of edges
+        x = self.layer1(x, latent=latent) # [R, F, T'] --> [R, F, T'']
+        x = self.layer2(x, latent=latent) # [R, F, T'] --> [R, F, T'']
+
+        # Join all edges with the edge of interest
+        # x = x.mean(-1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
+        x = x.reshape(BS*NC, NR, x.size(-1))
+
+        x_skip = x
+
+        x = self.edge2node(x, rel_rec, rel_send) # [R, F] --> [N, F] # marshalling
+        x = swish(self.mlp2(x)) # [N, F] --> [N, F]
+
+        x = self.node2edge(x, rel_rec, rel_send) # [N, F] --> [R, 2F] # marshalling
+        x = torch.cat((x, x_skip), dim=2)  # [R, 2F] --> [R, 3F] # Skip connection
+        x = swish(self.mlp3(x)) # [R, 3F] --> [R, F]
+
+
+        x = self.layer3(x.reshape(BS, NC, NR, -1), latent) # [R, F] --> [R, F] # Conditioning layer
+
+        energy = self.energy_map(x.reshape(BS, NC, NR, -1)).squeeze(-1).mean(1) # [R, F] --> [R, 1] # Project features to scalar
+
+        if mask is not None:
+            if len(mask.shape) < 2:
+                mask = mask[None, :]
+            energy = energy * mask
+
+        return energy
+
+# class dec(nn.Module):
+#     """MLP decoder module."""
+#
+#     def __init__(self, n_in_node, edge_types, msg_hid, msg_out, n_hid,
+#                  do_prob=0., skip_first=False):
+#         super(dec, self).__init__()
+#         self.msg_fc1 = nn.ModuleList(
+#             [nn.Linear(2 * n_in_node, msg_hid) for _ in range(edge_types)])
+#         self.msg_fc2 = nn.ModuleList(
+#             [nn.Linear(msg_hid, msg_out) for _ in range(edge_types)])
+#         self.msg_out_shape = msg_out
+#         self.skip_first_edge_type = skip_first
+#
+#         self.out_fc1 = nn.Linear(n_in_node + msg_out, n_hid)
+#         self.out_fc2 = nn.Linear(n_hid, n_hid)
+#         self.out_fc3 = nn.Linear(n_hid, n_in_node)
+#
+#         print('Using learned interaction net decoder.')
+#
+#         self.dropout_prob = do_prob
+#
+#     def single_step_forward(self, single_timestep_inputs, rel_rec, rel_send,
+#                             single_timestep_rel_type):
+#
+#         # single_timestep_inputs has shape
+#         # [batch_size, num_timesteps, num_atoms, num_dims]
+#
+#         # single_timestep_rel_type has shape:
+#         # [batch_size, num_timesteps, num_atoms*(num_atoms-1), num_edge_types]
+#
+#         # Node2edge
+#         receivers = torch.matmul(rel_rec, single_timestep_inputs)
+#         senders = torch.matmul(rel_send, single_timestep_inputs)
+#         pre_msg = torch.cat([senders, receivers], dim=-1)
+#
+#         all_msgs = Variable(torch.zeros(pre_msg.size(0), pre_msg.size(1),
+#                                         pre_msg.size(2), self.msg_out_shape))
+#         if single_timestep_inputs.is_cuda:
+#             all_msgs = all_msgs.cuda()
+#
+#         if self.skip_first_edge_type:
+#             start_idx = 1
+#         else:
+#             start_idx = 0
+#
+#         # Run separate MLP for every edge type
+#         # NOTE: To exlude one edge type, simply offset range by 1
+#         for i in range(start_idx, len(self.msg_fc2)):
+#             msg = F.relu(self.msg_fc1[i](pre_msg))
+#             msg = F.dropout(msg, p=self.dropout_prob)
+#             msg = F.relu(self.msg_fc2[i](msg))
+#             msg = msg * single_timestep_rel_type[:, :, :, i:i + 1]
+#             all_msgs += msg
+#
+#         # Aggregate all msgs to receiver
+#         agg_msgs = all_msgs.transpose(-2, -1).matmul(rel_rec).transpose(-2, -1)
+#         agg_msgs = agg_msgs.contiguous()
+#
+#         # Skip connection
+#         aug_inputs = torch.cat([single_timestep_inputs, agg_msgs], dim=-1)
+#
+#         # Output MLP
+#         pred = F.dropout(F.relu(self.out_fc1(aug_inputs)), p=self.dropout_prob)
+#         pred = F.dropout(F.relu(self.out_fc2(pred)), p=self.dropout_prob)
+#         pred = self.out_fc3(pred)
+#
+#         # Predict position/velocity difference
+#         return single_timestep_inputs + pred
+#
+#     def forward(self, inputs, rel_type, rel_rec, rel_send, pred_steps=1):
+#         # NOTE: Assumes that we have the same graph across all samples.
+#
+#         inputs = inputs.transpose(1, 2).contiguous()
+#
+#         sizes = [rel_type.size(0), inputs.size(1), rel_type.size(1),
+#                  rel_type.size(2)]
+#         rel_type = rel_type.unsqueeze(1).expand(sizes)
+#
+#         time_steps = inputs.size(1)
+#         assert (pred_steps <= time_steps)
+#         preds = []
+#
+#         # Only take n-th timesteps as starting points (n: pred_steps)
+#         last_pred = inputs[:, 0::pred_steps, :, :]
+#         curr_rel_type = rel_type[:, 0::pred_steps, :, :]
+#         # NOTE: Assumes rel_type is constant (i.e. same across all time steps).
+#
+#         # Run n prediction steps
+#         for step in range(0, pred_steps):
+#             last_pred = self.single_step_forward(last_pred, rel_rec, rel_send,
+#                                                  curr_rel_type)
+#             preds.append(last_pred)
+#
+#         sizes = [preds[0].size(0), preds[0].size(1) * pred_steps,
+#                  preds[0].size(2), preds[0].size(3)]
+#
+#         output = Variable(torch.zeros(sizes))
+#         if inputs.is_cuda:
+#             output = output.cuda()
+#
+#         # Re-assemble correct timeline
+#         for i in range(len(preds)):
+#             output[:, i::pred_steps, :, :] = preds[i]
+#
+#         pred_all = output[:, :(inputs.size(1) - 1), :, :]
+#
+#         return pred_all.transpose(1, 2).contiguous()
+
 class NodeID(nn.Module):
     def __init__(self, args):
         super(NodeID, self).__init__()
@@ -333,15 +603,24 @@ class CondMLPResBlock1d(nn.Module):
         gain2 = latent_2[:, :, :self.filters]
         bias2 = latent_2[:, :, self.filters:]
 
+        if len(x.shape) > 3:
+            x = self.fc1(x)
+            x = gain[:, None] * x + bias[:, None]
+            x = swish(x)
 
-        x = self.fc1(x)
-        x = gain * x + bias
-        x = swish(x)
+
+            x = self.fc2(x)
+            x = gain2[:, None] * x + bias2[:, None]
+            x = swish(x)
+        else:
+            x = self.fc1(x)
+            x = gain * x + bias
+            x = swish(x)
 
 
-        x = self.fc2(x)
-        x = gain2 * x + bias2
-        x = swish(x)
+            x = self.fc2(x)
+            x = gain2 * x + bias2
+            x = swish(x)
 
         x_out = x_orig + x
 

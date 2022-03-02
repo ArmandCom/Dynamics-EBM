@@ -1,6 +1,6 @@
 import torch
 import time
-from models import EdgeGraphEBM_LateFusion # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import EdgeGraphEBM_OneStep # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
 # from tensorflow.python.platform import flags
 import numpy as np
@@ -316,7 +316,7 @@ def sync_model(models): # Q: What is this about?
             dist.broadcast(param.data, 0)
 
 def init_model(FLAGS, device, dataset):
-    model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
@@ -420,6 +420,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
 
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+            # feat_enc = feat[:, :, :10] # TODO: Hardcoded
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
             feat_enc = normalize_trajectories(feat_enc)
@@ -506,9 +507,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
             feat_negs = torch.stack(feat_negs, dim=1)
-
-            # if FLAGS.scheduler:
-            #     scheduler.step()
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
@@ -727,7 +725,7 @@ def main_single(rank, FLAGS):
     if FLAGS.logname == 'debug':
         logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
     else:
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint-split',
+        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint-split-onestep',
                             'NO' +str(FLAGS.n_objects)
                           + '_BS' + str(FLAGS.batch_size)
                           + '_S-LR' + str(FLAGS.step_lr)
