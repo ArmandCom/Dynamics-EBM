@@ -216,7 +216,6 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
 
     feat_negs = []
 
-    feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
 
     # TODO: Sample from buffer.
@@ -232,9 +231,19 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         #     num_fixed_timesteps = random.randint(3, num_fixed_timesteps)
         #### FEATURE TEST #####
 
+    #### FEATURE TEST ##### random fixed steps
+    # if FLAGS.num_fixed_timesteps > 0:
+    # if random.random() < 0.5:
+    #     num_fixed_timesteps = random.randint(3, num_fixed_timesteps)
+    # fixed_points_mask = torch.rand_like(feat_neg) < ((num_fixed_timesteps + 6)/FLAGS.num_timesteps)
+    # feat_neg[fixed_points_mask] = feat_fixed[fixed_points_mask]
+
+    feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
+
     if FLAGS.num_fixed_timesteps > 0:
         feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
                               feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+
     feat_neg_kl = None
 
     for i in range(num_steps):
@@ -263,6 +272,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
                 energy = models[ii].forward(feat_neg, latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
+        # TODO: Calculate grads without taking into account the fixed points.
 
         #### FEATURE TEST #####
         # clamp_val, feat_grad_norm = .8, feat_grad.norm()
@@ -295,9 +305,11 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
             feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] # GD computation
 
 
+        #### FEATURE TEST #####
+        # feat_neg[fixed_points_mask] = feat_fixed[fixed_points_mask]
         if num_fixed_timesteps > 0:
             feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
-                                  feat_neg], dim=2)
+                                      feat_neg], dim=2)
 
         # latents = latents
         feat_neg = torch.clamp(feat_neg, -1, 1)
@@ -444,7 +456,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-
+        # TODO: print sampling process
         break
 
     [model.train() for model in models]

@@ -295,6 +295,7 @@ class EdgeGraphEBM_OneStep(nn.Module):
         rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
         rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
 
+        # TODO: Implement multi-resolution.
         inputs = inputs.unfold(-2, self.num_time_instances, 1).permute(0, 2, 1, -1, 3)
         # [BS][N, T, F] --> [BS * NC (num chunks)][N, T', ND]
         BS, NC, NO, NTI, ND = inputs.shape
