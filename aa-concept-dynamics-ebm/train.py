@@ -346,6 +346,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+            # feat_enc = feat[:, :, :10]
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
             feat_enc = normalize_trajectories(feat_enc, augment=False) # We maxmin normalize the batch
@@ -357,17 +358,19 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
         ### NOTE: TEST 1: All but 1 latent
         mask = torch.ones(FLAGS.components).to(dev)
-        # mask[:-2] *= 2
+
+        # mask[:] = 0
+        latent = latent * mask[None, :, None]
         # step += 8
 
         # latent = latent[:]
         # cyc_perm = (torch.arange(bs) + 1) % bs
         # latent_old = latent
-        b_idx_ref = 12
-        latent = torch.cat([latent[:, :3], latent[b_idx_ref:b_idx_ref+1, 3:].repeat(bs, 1, 1)], dim=1)
+        b_idx_ref = 14
+        # latent = torch.cat([latent[:, :3], latent[b_idx_ref:b_idx_ref+1, 3:].repeat(bs, 1, 1)], dim=1)
         # latent = latent[cyc_perm]
         # print((latent - latent_old).norm())
-        latent = latent[b_idx_ref:b_idx_ref+1].repeat(bs, 1, 1)
+        # latent = latent[b_idx_ref:b_idx_ref+1].repeat(bs, 1, 1)
         latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
@@ -376,13 +379,13 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                                                                        create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
-            b_idx = 8
+            b_idx = 9
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            limpos = 1
-            limneg = 1
+            limpos = 4
+            limneg = 4
 
             logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
