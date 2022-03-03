@@ -250,6 +250,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         if FLAGS.num_fixed_timesteps > 0:
             feat_neg = torch.cat([feat_fixed,
                                   feat_var], dim=2)
+        else: feat_neg = feat_var
 
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
@@ -314,6 +315,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         # feat_neg[fixed_points_mask] = feat_fixed[fixed_points_mask]
         if num_fixed_timesteps > 0:
             feat_neg = torch.cat([feat_fixed, feat_var], dim=2)
+        else: feat_neg = feat_var
 
         # latents = latents
         feat_neg = torch.clamp(feat_neg, -1, 1)
