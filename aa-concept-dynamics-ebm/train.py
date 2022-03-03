@@ -322,8 +322,8 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         feat_negs.append(feat_neg)
 
         #### FEATURE TEST ##### If commented out, backprop through all. (?)
-        # feat_neg = feat_neg.detach()
-        # feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+        feat_neg = feat_neg.detach()
+        feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
     return feat_neg, feat_negs, feat_neg_kl, feat_grad
 
@@ -443,12 +443,10 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
 
         if FLAGS.forecast:
             feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
-            # feat_enc = feat[:, :, :10] # TODO: Hardcoded
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
             feat_enc = normalize_trajectories(feat_enc)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
-
 
         feat_neg = torch.rand_like(feat) * 2 - 1
         if replay_buffer is not None:
@@ -482,7 +480,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
 
     [model.train() for model in models]
 
-def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx):
+def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx, replay_buffer=None):
 
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
@@ -490,8 +488,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     schedulers = [StepLR(optimizer, step_size=80000, gamma=0.1) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
-    if FLAGS.replay_batch or FLAGS.entropy_nn:
+    if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
         replay_buffer = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)# Flags.transform
+        # print('WRONG'); exit()
 
     # if FLAGS.scheduler:
     #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers, T_max=1000, eta_min=0, last_epoch=-1)
@@ -733,7 +732,6 @@ def main_single(rank, FLAGS):
     rank_idx = FLAGS.node_rank * FLAGS.gpus + rank
     world_size = FLAGS.nodes * FLAGS.gpus
 
-
     if not os.path.exists('result/%s' % FLAGS.exp):
         try:
             os.makedirs('result/%s' % FLAGS.exp)
@@ -756,6 +754,7 @@ def main_single(rank, FLAGS):
 
     shuffle=True
     sampler = None
+    replay_buffer = None
 
     # p = random.randint(0, 9)
     if world_size > 1:
@@ -799,6 +798,10 @@ def main_single(rank, FLAGS):
 
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+        if FLAGS.replay_batch:
+            try:
+                replay_buffer = torch.load(osp.join(logdir, "rb.pt"))
+            except: pass
         FLAGS = checkpoint['FLAGS']
 
         # logdir += '_FSeqL0_RB1' # TODO: remove
@@ -871,7 +874,7 @@ def main_single(rank, FLAGS):
             models_ema = [model_ema.eval() for model_ema in models_ema]
 
     if FLAGS.train:
-        train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx)
+        train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx, replay_buffer)
 
     elif FLAGS.test_manipulate: # TODO: What is this
         test_manipulate(test_manipulate_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter, save=True, logger=logger)
