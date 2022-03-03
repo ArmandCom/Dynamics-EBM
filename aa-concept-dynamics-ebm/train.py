@@ -394,6 +394,11 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
+        if replay_buffer is not None:
+            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
+                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
+                replay_batch = decompress_x_mod(replay_batch)
+                feat_neg = torch.Tensor(replay_batch).to(dev)
 
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
                                                                        create_graph=False) # TODO: why create_graph
@@ -418,7 +423,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
     print('test done')
     exit()
 
-def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
+def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger=None, replay_buffer=None):
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
@@ -427,8 +432,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
     if FLAGS.independent_energies:
         edge_ids = torch.eye(FLAGS.components)[None]\
             .to(dev).requires_grad_(False)
-
-    replay_buffer = None
 
     [model.eval() for model in models]
     # [getattr(model, module).train() for model in models for module in ['rnn1', 'rnn2']]
@@ -446,7 +449,13 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             feat_enc = normalize_trajectories(feat_enc)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
+
         feat_neg = torch.rand_like(feat) * 2 - 1
+        if replay_buffer is not None:
+            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
+                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
+                replay_batch = decompress_x_mod(replay_batch)
+                feat_neg = torch.Tensor(replay_batch).to(dev)
 
         mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
@@ -688,7 +697,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
 
-                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger)
+                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger, replay_buffer=replay_buffer)
 
                 string += 'Time: %.1fs' % (time.perf_counter()-start_time)
                 print(string)
@@ -708,6 +717,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 torch.save(ckpt, model_path)
                 print("Saving model in directory....")
                 print('run test')
+
+                if replay_buffer is not None:
+                    replay_buffer_path = osp.join(logdir, "rb.pt")
+                    torch.save(replay_buffer, replay_buffer_path)
+                    # a = torch.load(replay_buffer_path)
 
                 test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger)
                 print('Test at step %d done!' % it)
