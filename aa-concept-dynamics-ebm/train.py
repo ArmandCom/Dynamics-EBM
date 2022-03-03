@@ -246,11 +246,11 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
     for i in range(num_steps):
         feat_noise.normal_()
 
-        feat_var = feat_neg[:, :,  num_fixed_timesteps:]
         if FLAGS.num_fixed_timesteps > 0:
+            feat_var = feat_neg[:, :,  num_fixed_timesteps:]
             feat_neg = torch.cat([feat_fixed,
                                   feat_var], dim=2)
-        else: feat_neg = feat_var
+        else: feat_var = feat_neg
 
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
@@ -320,8 +320,10 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         # latents = latents
         feat_neg = torch.clamp(feat_neg, -1, 1)
         feat_negs.append(feat_neg)
-        feat_neg = feat_neg.detach()
-        feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+
+        #### FEATURE TEST ##### If commented out, backprop through all. (?)
+        # feat_neg = feat_neg.detach()
+        # feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
     return feat_neg, feat_negs, feat_neg_kl, feat_grad
 
@@ -453,12 +455,16 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                                                              create_graph=False) # TODO: why create_graph
 
         if save:
+            feat_negs = torch.stack(feat_negs, dim=1)
+
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
+            # logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
+            for i_plt in range(feat_negs.shape[1]):
+                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[:, i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
@@ -544,7 +550,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
-
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
                 # latent = (latent, mask)
 
@@ -676,7 +681,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                         string += "%s: %.6f  " % (k,v)
                     logger.add_scalar(k, v, it)
 
-                logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                if it % 500 == 0:
+                    for i_plt in range(feat_negs.shape[1]):
+                        logger.add_figure('gen', get_trajectory_figure(feat_negs[:, i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], it + i_plt)
+                else: logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
 
                 test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger)
