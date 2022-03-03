@@ -210,10 +210,12 @@ class EdgeGraphEBM_OneStep(nn.Module):
 
         if spectral_norm:
             self.energy_map = sn(nn.Linear(filter_dim, 1))
+            self.mlp1_2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp3 = sn(nn.Linear(filter_dim * 3, filter_dim))
         else:
             self.energy_map = nn.Linear(filter_dim, 1)
+            self.mlp1_2 = nn.Linear(filter_dim, filter_dim)
             self.mlp2 = nn.Linear(filter_dim, filter_dim)
             self.mlp3 = nn.Linear(filter_dim * 3, filter_dim)
 
@@ -320,6 +322,10 @@ class EdgeGraphEBM_OneStep(nn.Module):
         # Unconditional pass for the rest of edges
         x = self.layer1(x, latent=latent) # [R, F, T'] --> [R, F, T'']
         x = self.layer2(x, latent=latent) # [R, F, T'] --> [R, F, T'']
+        x = self.layer3(x.reshape(BS, NC, NR, -1), latent)
+
+        x = swish(self.mlp1_2(x)) # [R, 3F] --> [R, F]
+
 
         # Join all edges with the edge of interest
         # x = x.mean(-1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
@@ -335,7 +341,7 @@ class EdgeGraphEBM_OneStep(nn.Module):
         x = swish(self.mlp3(x)) # [R, 3F] --> [R, F]
 
 
-        x = self.layer3(x.reshape(BS, NC, NR, -1), latent) # [R, F] --> [R, F] # Conditioning layer
+        # x = self.layer3(x.reshape(BS, NC, NR, -1), latent) # [R, F] --> [R, F] # Conditioning layer
 
         energy = self.energy_map(x.reshape(BS, NC, NR, -1)).squeeze(-1).mean(1) # [R, F] --> [R, 1] # Project features to scalar
 
