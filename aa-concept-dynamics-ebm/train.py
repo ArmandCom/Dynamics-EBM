@@ -32,7 +32,7 @@ import random
 # from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
     linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
-    normalize_trajectories, augment_trajectories, MMD
+    normalize_trajectories, augment_trajectories, MMD, align_replayed_batch
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
@@ -399,6 +399,9 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
                 replay_batch = decompress_x_mod(replay_batch)
                 feat_neg = torch.Tensor(replay_batch).to(dev)
+                feat_neg = align_replayed_batch(feat, feat_neg)
+                if FLAGS.num_fixed_timesteps > 0:
+                    feat_neg = align_replayed_batch(feat, feat_neg)
 
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
                                                                        create_graph=False) # TODO: why create_graph
@@ -461,6 +464,10 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
 
+        ## Add to the replay buffer
+        if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
+            replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
+
         if save:
             feat_negs = torch.stack(feat_negs, dim=1)
 
@@ -472,6 +479,9 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             for i_plt in range(feat_negs.shape[1]):
                 logger.add_figure('test_gen', get_trajectory_figure(feat_negs[:, i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+            if replay_buffer is not None:
+                replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
+                torch.save(replay_buffer, replay_buffer_path)
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
@@ -490,7 +500,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
     if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
         replay_buffer = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)# Flags.transform
-        # print('WRONG'); exit()
+        replay_buffer_test = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)
+    else: replay_buffer_test = None
 
     # if FLAGS.scheduler:
     #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers, T_max=1000, eta_min=0, last_epoch=-1)
@@ -533,6 +544,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 replay_batch = decompress_x_mod(replay_batch)
                 replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
                 feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
+                if FLAGS.num_fixed_timesteps > 0:
+                    feat_neg = align_replayed_batch(feat, feat_neg)
 
             mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
@@ -557,6 +570,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             #### TEST FEATURE ####
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
+
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
                 # latent = (latent, mask)
@@ -649,7 +663,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 kvs = {}
                 kvs['loss'] = avg_loss
 
-                if not FLAGS.autoencode:
+                if not FLAGS.autoencode or FLAGS.cd_and_ae:
                     energy_pos_mean = energy_pos.mean().item()
                     energy_neg_mean = energy_neg.mean().item()
                     energy_pos_std = energy_pos.std().item()
@@ -696,7 +710,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
 
-                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger, replay_buffer=replay_buffer)
+                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger, replay_buffer=replay_buffer_test)
 
                 string += 'Time: %.1fs' % (time.perf_counter()-start_time)
                 print(string)
@@ -722,7 +736,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     torch.save(replay_buffer, replay_buffer_path)
                     # a = torch.load(replay_buffer_path)
 
-                test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger)
+                test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger, replay_buffer=replay_buffer_test)
                 print('Test at step %d done!' % it)
                 print('Experiment: ' + logger.log_dir.split('/')[-1])
 

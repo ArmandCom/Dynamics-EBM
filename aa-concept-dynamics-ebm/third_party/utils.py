@@ -108,6 +108,18 @@ class ReplayBuffer(object):
             for i, ix in enumerate(idxes):
                 self._storage[ix] = data[i]
 
+def align_replayed_batch(feat, rep_feat):
+    # BS, N, T, F = rep_feat.shape
+    ff_loc_0, ff_vel_0  = feat[..., :1, :2],     feat[..., :1, 2:4]
+    bf_loc_0, bf_vel_0 =  rep_feat[..., :1, :2], rep_feat[..., :1, 2:4]
+
+    vel_ratio = ff_vel_0 / bf_vel_0
+    rep_feat[..., :2] -= bf_loc_0
+    rep_feat[..., :4] *= torch.cat([vel_ratio, vel_ratio], dim=-1)
+    rep_feat[..., :2] += ff_loc_0
+
+    return rep_feat
+
 def compress_x_mod(x_mod):
     x_mod = (np.clip(x_mod, -1, 1)).astype(np.float16)
     return x_mod
