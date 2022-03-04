@@ -262,8 +262,8 @@ class SpringsParticles(data.Dataset):
         # interaction_strength=1., noise_var=0.):
         self.args = args
         self.n_objects = args.n_objects
-
-        feat, edges, stats = self._load_data(suffix='_springs'+str(self.n_objects), split=split)
+        suffix = '_springs'+str(self.n_objects)
+        feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
         self.length = feat.shape[0]
@@ -361,7 +361,10 @@ class ChargedParticles(data.Dataset):
         self.args = args
         self.n_objects = args.n_objects
 
-        feat, edges, stats = self._load_data(suffix='_charged'+str(self.n_objects), split=split)
+        suffix = '_charged'+str(self.n_objects)
+        suffix += '_nobox_05int-strength'
+
+        feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
         self.length = feat.shape[0]
