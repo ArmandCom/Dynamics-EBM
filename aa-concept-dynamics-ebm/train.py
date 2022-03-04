@@ -457,6 +457,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
                 replay_batch = decompress_x_mod(replay_batch)
                 feat_neg = torch.Tensor(replay_batch).to(dev)
+                if FLAGS.num_fixed_timesteps > 0:
+                    feat_neg = align_replayed_batch(feat, feat_neg)
 
         mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
