@@ -495,7 +495,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
     grad_norm_ema = None
-    schedulers = [StepLR(optimizer, step_size=80000, gamma=0.1) for optimizer in optimizers]
+    schedulers = [StepLR(optimizer, step_size=20000, gamma=0.5) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
@@ -525,9 +525,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             else: feat_enc = feat
             if FLAGS.normalize_data_latent:
                 feat_enc = normalize_trajectories(feat_enc, augment=True)
-
             rand_idx = torch.randint(2, (1,))
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
+
+            #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
+            # feat = feat[:, :, :5]
 
             #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
             # feat_noise = torch.randn_like(feat).detach()
@@ -548,6 +550,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
             mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
+            # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
             feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
