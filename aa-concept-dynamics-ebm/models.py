@@ -235,6 +235,9 @@ class EdgeGraphEBM_OneStep(nn.Module):
         self.layer2 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
         self.layer3 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
 
+        # self.layer1_bf = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
+        # self.layer2_bf = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
+
         if self.factor:
             print("Using factor graph CNN encoder.")
         else:
@@ -332,12 +335,9 @@ class EdgeGraphEBM_OneStep(nn.Module):
         x = swish(self.mlp1(edges_unfold.reshape(BS, NC*NR, -1))).reshape(BS, NC, NR, -1)  # [R, 8 * NTI] --> [R, F] # CNN layers
 
         # Unconditional pass for the rest of edges
-        x = self.layer1(x, latent=latent) # [R, F, T'] --> [R, F, T'']
-        x = self.layer2(x, latent=latent) # [R, F, T'] --> [R, F, T'']
-        x = self.layer3(x.reshape(BS, NC, NR, -1), latent)
-
-        x = swish(self.mlp1_2(x)) # [R, 3F] --> [R, F]
-
+        # x = self.layer1_bf(x, latent)
+        # x = swish(self.mlp1_2(x))
+        # x = x * mask[:, None, :, None]
 
         # Join all edges with the edge of interest
         x = x.reshape(BS*NC, NR, x.size(-1))
