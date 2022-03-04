@@ -194,6 +194,7 @@ class EdgeGraphEBM_OneStep(nn.Module):
         spectral_norm = args.spectral_norm
 
         self.factor = True
+        self.global_feats = True
         self.num_time_instances = 3
         self.stride = 1
         state_dim = args.input_dim
@@ -203,7 +204,9 @@ class EdgeGraphEBM_OneStep(nn.Module):
             state_dim += args.obj_id_dim
             self.obj_embedding = NodeID(args)
 
-        # self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+        if self.global_feats:
+            # self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+            self.layer4 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm, downsample=False, kernel_size=3)
 
         self.mlp1 = MLPBlock(state_dim * 2 * self.num_time_instances, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
         # self.mlp3 = MLPBlock(filter_dim * 3, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
@@ -213,11 +216,17 @@ class EdgeGraphEBM_OneStep(nn.Module):
             self.mlp1_2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp3 = sn(nn.Linear(filter_dim * 3, filter_dim))
+            if self.global_feats:
+                self.cnn = sn(nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1))
+                self.energy_map_glob = sn(nn.Linear(filter_dim, 1))
         else:
             self.energy_map = nn.Linear(filter_dim, 1)
             self.mlp1_2 = nn.Linear(filter_dim, filter_dim)
             self.mlp2 = nn.Linear(filter_dim, filter_dim)
             self.mlp3 = nn.Linear(filter_dim * 3, filter_dim)
+            if self.global_feats:
+                self.cnn = nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1)
+                self.energy_map_global = nn.Linear(filter_dim, 1)
 
         # self.layer_cnn_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
         # self.layer1_cnn = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
@@ -297,13 +306,8 @@ class EdgeGraphEBM_OneStep(nn.Module):
 
         rel_rec = self.rel_rec #.repeat_interleave(inputs.size(0), dim=0)
         rel_send = self.rel_send #.repeat_interleave(inputs.size(0), dim=0)
-
-        # TODO: Implement multi-resolution.
-        inputs = inputs.unfold(-2, self.num_time_instances, self.stride).permute(0, 2, 1, -1, 3)
-        # [BS][N, T, F] --> [BS * NC (num chunks)][N, T', ND]
-        BS, NC, NO, NTI, ND = inputs.shape
+        BS, NO, T, ND = inputs.shape
         NR = NO * (NO - 1)
-        inputs = inputs.flatten(0, 1)
 
         if self.obj_id_embedding:
             inputs = self.obj_embedding(inputs)
@@ -311,13 +315,21 @@ class EdgeGraphEBM_OneStep(nn.Module):
 
         if isinstance(latent, tuple):
             latent, mask = latent
-        else: mask = None
+            if len(mask.shape) < 2:
+                mask = mask[None]
+        else: mask = torch.ones((1, 1)).to(inputs.device)
 
         # NTI: number of time instances
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
-        x = swish(self.mlp1(edges.reshape(BS, NC*NR, -1))).reshape(BS, NC, NR, -1)  # [R, 8 * NTI] --> [R, F] # CNN layers
+
+        # TODO: Implement multi-resolution.
+        edges_unfold = edges.unfold(-1, self.num_time_instances, self.stride)
+        _, _, NC, NTI = edges_unfold.shape
+        edges_unfold = edges_unfold.reshape(BS, NR, 2*ND, NC, NTI).permute(0, 3, 1, 2, 4)
+
+        x = swish(self.mlp1(edges_unfold.reshape(BS, NC*NR, -1))).reshape(BS, NC, NR, -1)  # [R, 8 * NTI] --> [R, F] # CNN layers
 
         # Unconditional pass for the rest of edges
         x = self.layer1(x, latent=latent) # [R, F, T'] --> [R, F, T'']
@@ -328,7 +340,6 @@ class EdgeGraphEBM_OneStep(nn.Module):
 
 
         # Join all edges with the edge of interest
-        # x = x.mean(-1) # [R, F, T'''] --> [R, F] # Temporal Avg pool
         x = x.reshape(BS*NC, NR, x.size(-1))
 
         x_skip = x
@@ -340,18 +351,151 @@ class EdgeGraphEBM_OneStep(nn.Module):
         x = torch.cat((x, x_skip), dim=2)  # [R, 2F] --> [R, 3F] # Skip connection
         x = swish(self.mlp3(x)) # [R, 3F] --> [R, F]
 
+        x = self.layer1(x.reshape(BS, NC, NR, -1), latent=latent) # [R, F, T'] --> [R, F, T'']
+        x = self.layer2(x, latent=latent) # [R, F, T'] --> [R, F, T'']
+        x = self.layer3(x, latent=latent) # [R, F] --> [R, F] # Conditioning layer
 
-        # x = self.layer3(x.reshape(BS, NC, NR, -1), latent) # [R, F] --> [R, F] # Conditioning layer
+        energy = self.energy_map(x).squeeze(-1).mean(1) # [R, F] --> [R, 1] # Project features to scalar
 
-        energy = self.energy_map(x.reshape(BS, NC, NR, -1)).squeeze(-1).mean(1) # [R, F] --> [R, 1] # Project features to scalar
+        if self.global_feats:
+            x = swish(self.cnn(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
+            x = self.layer4(x, latent=latent) # [R, F] --> [R, F] # Conditioning layer
+            x = x.mean(-1).reshape(BS, NR, -1)
+            energy = energy + self.energy_map_global(x).squeeze(-1) # [R, F] --> [R, 1] # Project features to scalar
 
-        if mask is not None:
-            if len(mask.shape) < 2:
-                mask = mask[None, :]
-            energy = energy * mask
+        energy = energy * mask
 
         return energy
 
+# class RNNdec(nn.Module):
+#     """Recurrent decoder module."""
+#
+#     def __init__(self, n_in_node, edge_types, n_hid,
+#                  do_prob=0., skip_first=False):
+#         super(RNNdec, self).__init__()
+#         self.msg_fc1 = nn.ModuleList(
+#             [nn.Linear(2 * n_hid, n_hid) for _ in range(edge_types)])
+#         self.msg_fc2 = nn.ModuleList(
+#             [nn.Linear(n_hid, n_hid) for _ in range(edge_types)])
+#         self.msg_out_shape = n_hid
+#         self.skip_first_edge_type = skip_first
+#
+#         self.hidden_r = nn.Linear(n_hid, n_hid, bias=False)
+#         self.hidden_i = nn.Linear(n_hid, n_hid, bias=False)
+#         self.hidden_h = nn.Linear(n_hid, n_hid, bias=False)
+#
+#         self.input_r = nn.Linear(n_in_node, n_hid, bias=True)
+#         self.input_i = nn.Linear(n_in_node, n_hid, bias=True)
+#         self.input_n = nn.Linear(n_in_node, n_hid, bias=True)
+#
+#         self.out_fc1 = nn.Linear(n_hid, n_hid)
+#         self.out_fc2 = nn.Linear(n_hid, n_hid)
+#         self.out_fc3 = nn.Linear(n_hid, n_in_node)
+#
+#         print('Using learned recurrent interaction net decoder.')
+#
+#         self.dropout_prob = do_prob
+#
+#     def single_step_forward(self, inputs, rel_rec, rel_send,
+#                             rel_type, hidden):
+#
+#         # node2edge
+#         receivers = torch.matmul(rel_rec, hidden)
+#         senders = torch.matmul(rel_send, hidden)
+#         pre_msg = torch.cat([senders, receivers], dim=-1)
+#
+#         all_msgs = Variable(torch.zeros(pre_msg.size(0), pre_msg.size(1),
+#                                         self.msg_out_shape))
+#         if inputs.is_cuda:
+#             all_msgs = all_msgs.cuda()
+#
+#         if self.skip_first_edge_type:
+#             start_idx = 1
+#             norm = float(len(self.msg_fc2)) - 1.
+#         else:
+#             start_idx = 0
+#             norm = float(len(self.msg_fc2))
+#
+#         # Run separate MLP for every edge type
+#         # NOTE: To exlude one edge type, simply offset range by 1
+#         for i in range(start_idx, len(self.msg_fc2)):
+#             msg = F.tanh(self.msg_fc1[i](pre_msg))
+#             msg = F.dropout(msg, p=self.dropout_prob)
+#             msg = F.tanh(self.msg_fc2[i](msg))
+#             msg = msg * rel_type[:, :, i:i + 1]
+#             all_msgs += msg / norm
+#
+#         agg_msgs = all_msgs.transpose(-2, -1).matmul(rel_rec).transpose(-2,
+#                                                                         -1)
+#         agg_msgs = agg_msgs.contiguous() / inputs.size(2)  # Average
+#
+#         # GRU-style gated aggregation
+#         r = F.sigmoid(self.input_r(inputs) + self.hidden_r(agg_msgs))
+#         i = F.sigmoid(self.input_i(inputs) + self.hidden_i(agg_msgs))
+#         n = F.tanh(self.input_n(inputs) + r * self.hidden_h(agg_msgs))
+#         hidden = (1 - i) * n + i * hidden
+#
+#         # Output MLP
+#         pred = F.dropout(F.relu(self.out_fc1(hidden)), p=self.dropout_prob)
+#         pred = F.dropout(F.relu(self.out_fc2(pred)), p=self.dropout_prob)
+#         pred = self.out_fc3(pred)
+#
+#         # Predict position/velocity difference
+#         pred = inputs + pred
+#
+#         return pred, hidden
+#
+#     def forward(self, data, rel_type, rel_rec, rel_send, pred_steps=1,
+#                 burn_in=False, burn_in_steps=1, dynamic_graph=False,
+#                 encoder=None, temp=None):
+#
+#         inputs = data.transpose(1, 2).contiguous()
+#
+#         time_steps = inputs.size(1)
+#
+#         # inputs has shape
+#         # [batch_size, num_timesteps, num_atoms, num_dims]
+#
+#         # rel_type has shape:
+#         # [batch_size, num_atoms*(num_atoms-1), num_edge_types]
+#
+#         hidden = Variable(
+#             torch.zeros(inputs.size(0), inputs.size(2), self.msg_out_shape))
+#         if inputs.is_cuda:
+#             hidden = hidden.cuda()
+#
+#         pred_all = []
+#
+#         for step in range(0, inputs.size(1) - 1):
+#
+#             if burn_in:
+#                 if step <= burn_in_steps:
+#                     ins = inputs[:, step, :, :]
+#                 else:
+#                     ins = pred_all[step - 1]
+#             else:
+#                 assert (pred_steps <= time_steps)
+#                 # Use ground truth trajectory input vs. last prediction
+#                 if not step % pred_steps:
+#                     ins = inputs[:, step, :, :]
+#                 else:
+#                     ins = pred_all[step - 1]
+#
+#             if dynamic_graph and step >= burn_in_steps:
+#                 # NOTE: Assumes burn_in_steps = args.timesteps
+#                 logits = encoder(
+#                     data[:, :, step - burn_in_steps:step, :].contiguous(),
+#                     rel_rec, rel_send)
+#                 rel_type = gumbel_softmax(logits, tau=temp, hard=True)
+#
+#             pred, hidden = self.single_step_forward(ins, rel_rec, rel_send,
+#                                                     rel_type, hidden)
+#             pred_all.append(pred)
+#
+#         preds = torch.stack(pred_all, dim=1)
+#
+#         return preds.transpose(1, 2).contiguous()
+#
 # class dec(nn.Module):
 #     """MLP decoder module."""
 #
@@ -477,7 +621,7 @@ class NodeID(nn.Module):
 
 # Support Modules
 class CondResBlock1d(nn.Module):
-    def __init__(self, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, latent_grid=False, spectral_norm=False):
+    def __init__(self, downsample=True, rescale=False, filters=64, latent_dim=64, im_size=64, kernel_size=5, latent_grid=False, spectral_norm=False):
         super(CondResBlock1d, self).__init__()
 
         self.filters = filters
@@ -493,11 +637,11 @@ class CondResBlock1d(nn.Module):
             self.bn1 = nn.GroupNorm(32, filters, affine=False)
 
         if spectral_norm:
-            self.conv1 = sn(nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2))
-            self.conv2 = sn(nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2))
+            self.conv1 = sn(nn.Conv1d(filters, filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2))
+            self.conv2 = sn(nn.Conv1d(filters, filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2))
         else:
-            self.conv1 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
-            self.conv2 = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
+            self.conv1 = nn.Conv1d(filters, filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2)
+            self.conv2 = nn.Conv1d(filters, filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2)
 
         if filters <= 128:
             self.bn2 = nn.InstanceNorm1d(filters, affine=False)
@@ -514,11 +658,11 @@ class CondResBlock1d(nn.Module):
         # Upscale to mask of image
         if downsample:
             if rescale:
-                self.conv_downsample = nn.Conv1d(filters, 2 * filters, kernel_size=5, stride=1, padding=2)
+                self.conv_downsample = nn.Conv1d(filters, 2 * filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2)
             else:
-                self.conv_downsample = nn.Conv1d(filters, filters, kernel_size=5, stride=1, padding=2)
+                self.conv_downsample = nn.Conv1d(filters, filters, kernel_size=kernel_size, stride=1, padding=kernel_size//2)
 
-            self.avg_pool = nn.AvgPool1d(5, stride=2, padding=1)
+            self.avg_pool = nn.AvgPool1d(kernel_size, stride=2, padding=kernel_size//2)
 
     def forward(self, x, latent):
 
@@ -529,34 +673,23 @@ class CondResBlock1d(nn.Module):
             latent_1 = self.latent_fc1(latent)
             latent_2 = self.latent_fc2(latent)
 
-            gain = latent_1[:, :self.filters, None]
-            bias = latent_1[:, self.filters:, None]
+            gain = latent_1[:, :, :self.filters]
+            bias = latent_1[:, :, self.filters:]
 
-            gain2 = latent_2[:, :self.filters, None]
-            bias2 = latent_2[:, self.filters:, None]
-
-            if latent.size(0) < x.size(0):
-
-                x = self.conv1(x)
-                x = x.reshape(latent.size(0), -1, *x.shape[-2:])
-                x = gain[:, None] * x + bias[:, None]
-                x = swish(x)
-
-                x = x.flatten(0,1)
-                x = self.conv2(x)
-                x = x.reshape(latent.size(0), -1, *x.shape[-2:])
-                x = gain2[:, None] * x + bias2[:, None]
-                x = swish(x)
-                x = x.flatten(0,1)
-            else:
-                x = self.conv1(x)
-                x = gain * x + bias
-                x = swish(x)
+            gain2 = latent_2[:, :, :self.filters]
+            bias2 = latent_2[:, :, self.filters:]
 
 
-                x = self.conv2(x)
-                x = gain2 * x + bias2
-                x = swish(x)
+            x = self.conv1(x)
+            x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+            x = gain[..., None] * x + bias[..., None]
+            x = swish(x)
+            x = x.flatten(0,1)
+            x = self.conv2(x)
+            x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+            x = gain2[..., None] * x + bias2[..., None]
+            x = swish(x)
+            x = x.flatten(0,1)
 
         else:
             x = self.conv1(x)
@@ -564,12 +697,34 @@ class CondResBlock1d(nn.Module):
             x = self.conv2(x)
             x = swish(x)
 
+        #     if latent.size(0) < x.size(0):
+        #
+        #         x = self.conv1(x)
+        #         x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+        #         x = gain[:, None] * x + bias[:, None]
+        #         x = swish(x)
+        #
+        #         x = x.flatten(0,1)
+        #         x = self.conv2(x)
+        #         x = x.reshape(latent.size(0), -1, *x.shape[-2:])
+        #         x = gain2[:, None] * x + bias2[:, None]
+        #         x = swish(x)
+        #         x = x.flatten(0,1)
+        #     else:
+        #         x = self.conv1(x)
+        #         x = gain * x + bias
+        #         x = swish(x)
+        #
+        #
+        #         x = self.conv2(x)
+        #         x = gain2 * x + bias2
+        #         x = swish(x)
+
         x_out = x_orig + x
 
         if self.downsample:
             x_out = swish(self.conv_downsample(x_out))
             x_out = self.avg_pool(x_out)
-
         return x_out
 
 class CondMLPResBlock1d(nn.Module):
