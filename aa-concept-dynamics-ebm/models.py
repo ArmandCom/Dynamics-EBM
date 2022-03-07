@@ -194,7 +194,7 @@ class EdgeGraphEBM_OneStep(nn.Module):
         spectral_norm = args.spectral_norm
 
         self.factor = True
-        self.global_feats = True
+        self.global_feats = False
         self.num_time_instances = 3
         self.stride = 1
         state_dim = args.input_dim
@@ -208,11 +208,13 @@ class EdgeGraphEBM_OneStep(nn.Module):
             # self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
             self.layer4 = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm, downsample=False, kernel_size=3)
 
-        self.mlp1 = MLPBlock(state_dim * 2 * self.num_time_instances, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+        self.mlp1 = MLPBlock(filter_dim * self.num_time_instances * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
         # self.mlp3 = MLPBlock(filter_dim * 3, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
 
         if spectral_norm:
             self.energy_map = sn(nn.Linear(filter_dim, 1))
+            self.cnn_bf = sn(nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1))
+            self.cnn_pre_bf = sn(nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1))
             self.mlp1_2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp2 = sn(nn.Linear(filter_dim, filter_dim))
             self.mlp3 = sn(nn.Linear(filter_dim * 3, filter_dim))
@@ -221,6 +223,8 @@ class EdgeGraphEBM_OneStep(nn.Module):
                 self.energy_map_glob = sn(nn.Linear(filter_dim, 1))
         else:
             self.energy_map = nn.Linear(filter_dim, 1)
+            self.cnn_bf = nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1)
+            self.cnn_pre_bf = nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1)
             self.mlp1_2 = nn.Linear(filter_dim, filter_dim)
             self.mlp2 = nn.Linear(filter_dim, filter_dim)
             self.mlp3 = nn.Linear(filter_dim * 3, filter_dim)
@@ -228,8 +232,8 @@ class EdgeGraphEBM_OneStep(nn.Module):
                 self.cnn = nn.Conv1d(state_dim * 2, filter_dim, kernel_size=3, padding=1)
                 self.energy_map_global = nn.Linear(filter_dim, 1)
 
-        # self.layer_cnn_encode = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, rescale=False, spectral_norm=spectral_norm)
-        # self.layer1_cnn = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
+        self.layer1_cnn_bf = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
+        self.layer2_cnn_bf = CondResBlock1d(filters=filter_dim, latent_dim=latent_dim, downsample=False, rescale=False, spectral_norm=spectral_norm)
 
         self.layer1 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
         self.layer2 = CondMLPResBlock1d(filters=filter_dim, latent_dim=latent_dim, spectral_norm=spectral_norm)
@@ -327,17 +331,29 @@ class EdgeGraphEBM_OneStep(nn.Module):
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
 
+        edges_pre = swish(self.cnn_pre_bf(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
+
+        # Convolutional Conditioning
+        edges = swish(self.cnn_bf(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
+        edges = self.layer1_cnn_bf(edges, latent)
+        edges = self.layer2_cnn_bf(edges, latent)
+
+        edges_cat = torch.cat([edges[..., :-1], edges_pre[..., 1:]], dim=-2)
+
         # TODO: Implement multi-resolution.
-        edges_unfold = edges.unfold(-1, self.num_time_instances, self.stride)
+        edges_unfold = edges_cat.unfold(-1, self.num_time_instances, self.stride)
         _, _, NC, NTI = edges_unfold.shape
-        edges_unfold = edges_unfold.reshape(BS, NR, 2*ND, NC, NTI).permute(0, 3, 1, 2, 4)
+        edges_unfold = edges_unfold.reshape(BS, NR, -1, NC, NTI).permute(0, 3, 1, 2, 4)
+
 
         x = swish(self.mlp1(edges_unfold.reshape(BS, NC*NR, -1))).reshape(BS, NC, NR, -1)  # [R, 8 * NTI] --> [R, F] # CNN layers
 
+        # TODO: message passing to each individual step before concat to the previous stage. (In couples)
         # Unconditional pass for the rest of edges
         # x = self.layer1_bf(x, latent)
+        # x = self.layer2_bf(x, latent)
         # x = swish(self.mlp1_2(x))
-        # x = x * mask[:, None, :, None]
+        x = x * mask[:, None, :, None]
 
         # Join all edges with the edge of interest
         x = x.reshape(BS*NC, NR, x.size(-1))
@@ -353,7 +369,7 @@ class EdgeGraphEBM_OneStep(nn.Module):
 
         x = self.layer1(x.reshape(BS, NC, NR, -1), latent=latent) # [R, F, T'] --> [R, F, T'']
         x = self.layer2(x, latent=latent) # [R, F, T'] --> [R, F, T'']
-        x = self.layer3(x, latent=latent) # [R, F] --> [R, F] # Conditioning layer
+        # x = self.layer3(x, latent=latent) # [R, F] --> [R, F] # Conditioning layer
 
         energy = self.energy_map(x).squeeze(-1).mean(1) # [R, F] --> [R, 1] # Project features to scalar
 
