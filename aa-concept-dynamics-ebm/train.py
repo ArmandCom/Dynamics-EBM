@@ -196,6 +196,42 @@ def average_gradients(models):
             dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
             param.grad.data /= size
 
+def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timesteps=None, stride=1, stage_steps=[10, 3]):
+    """
+    Samples trajectory auto-regressively in test.
+
+    ini_timesteps: number of timesteps sampled at once the first time
+    stride: how many more samples add at each iteration
+    stage_steps: How many steps does the sampling take at each iteration. If list, it should be of length 2 and contain:
+        The initial number of steps and the number of steps at each iteration after.
+    Note: We might not sample all trajectory if max_len is not divisible by stride
+    """
+
+    max_len = feat.shape[2]
+    num_fixed_timesteps_old = FLAGS.num_fixed_timesteps
+    if ini_timesteps is None:
+        ini_timesteps = num_fixed_timesteps_old + 1
+
+    feat_in = feat[:, :, :num_fixed_timesteps_old]
+    feat_negs_all =[]
+    for t in range(ini_timesteps, max_len, stride):
+        feat_neg_in = feat_neg[:, :, :t]
+
+        if isinstance(stage_steps, list):
+            # assert len(stage_steps) == 2
+            stage_step = stage_steps[0] if t == ini_timesteps else stage_steps[1]
+        elif isinstance(stage_steps, int): stage_step = stage_steps
+        else: raise NotImplementedError
+
+        feat_neg_out, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg_in, feat_in, stage_step, FLAGS.sample,
+                                                                       create_graph=False)
+        feat_in = feat_neg_out
+        feat_negs_all.extend(feat_negs)
+        FLAGS.num_fixed_timesteps = feat_in.shape[2]
+
+    FLAGS.num_fixed_timesteps = num_fixed_timesteps_old
+    return feat_neg, feat_negs, feat_neg_kl, feat_grad
+
 def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
@@ -463,8 +499,9 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
-                                                             create_graph=False) # TODO: why create_graph
+        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timesteps=5, stride=2, stage_steps=2)
+        # feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+        #                                                      create_graph=False) # TODO: why create_graph
 
         ## Add to the replay buffer
         if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
@@ -497,7 +534,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
     grad_norm_ema = None
-    schedulers = [StepLR(optimizer, step_size=20000, gamma=0.5) for optimizer in optimizers]
+    schedulers = [StepLR(optimizer, step_size=30000, gamma=0.5) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
