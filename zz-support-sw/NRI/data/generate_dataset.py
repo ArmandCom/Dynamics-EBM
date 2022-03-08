@@ -29,12 +29,15 @@ if args.simulation == 'springs':
     sim = SpringSim(noise_var=0.0, n_balls=args.n_balls)
     suffix = '_springs'
 elif args.simulation == 'charged':
-    sim = ChargedParticlesSim(noise_var=0.0, n_balls=args.n_balls)
+    sim = ChargedParticlesSim(noise_var=0.0, n_balls=args.n_balls,
+                              box_size=float('inf'), loc_std=1., vel_norm=0.5,
+                              interaction_strength=.5)
     suffix = '_charged'
 else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
+suffix += 'inter0.5_nowalls_sf10'
 np.random.seed(args.seed)
 
 print(suffix)
