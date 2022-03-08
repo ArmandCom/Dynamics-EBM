@@ -91,8 +91,8 @@ class CNN(nn.Module):
 		# x = self.bn2(x)
 		pred = self.conv_predict(x)
 
-		attention = my_softmax(self.conv_attention(x), axis=2)
-		edge_prob = (pred * attention).mean(dim=2)
+		# attention = my_softmax(self.conv_attention(x), axis=2)
+		# edge_prob = (pred * attention).mean(dim=2)
 
 		edge_prob = pred.mean(dim=2)
 		return edge_prob

@@ -218,8 +218,14 @@ def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timeste
         feat_neg_in = feat_neg[:, :, :t]
 
         if isinstance(stage_steps, list):
-            # assert len(stage_steps) == 2
-            stage_step = stage_steps[0] if t == ini_timesteps else stage_steps[1]
+            # assert len(stage_steps) == 3
+            if t == ini_timesteps:
+                stage_step = stage_steps[0]
+            elif t >= max_len - stride:
+                stage_step = stage_steps[2]
+                feat_neg_in = feat_neg_out
+                FLAGS.num_fixed_timesteps = num_fixed_timesteps_old
+            else: stage_step = stage_steps[1]
         elif isinstance(stage_steps, int): stage_step = stage_steps
         else: raise NotImplementedError
 
@@ -230,7 +236,7 @@ def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timeste
         FLAGS.num_fixed_timesteps = feat_in.shape[2]
 
     FLAGS.num_fixed_timesteps = num_fixed_timesteps_old
-    return feat_neg, feat_negs, feat_neg_kl, feat_grad
+    return feat_neg, feat_negs_all, feat_neg_kl, feat_grad
 
 def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     feat_noise = torch.randn_like(feat_neg).detach()
@@ -499,25 +505,30 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timesteps=5, stride=2, stage_steps=2)
-        # feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
-        #                                                      create_graph=False) # TODO: why create_graph
+        if save:
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = \
+                gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat,
+                              ini_timesteps=10, stride=1, stage_steps=[40, 20, 40])
+        else:
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+                                                             create_graph=False) # TODO: why create_graph
 
         ## Add to the replay buffer
         if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
             replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
 
         if save:
-            feat_negs = torch.stack(feat_negs, dim=1)
-
+            # feat_negs = torch.stack(feat_negs, dim=1)
+            # feat_negs = feat_negs
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
             # logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
-            for i_plt in range(feat_negs.shape[1]):
-                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[:, i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+            for i_plt in range(len(feat_negs)):
+                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+            # input('a')
             if replay_buffer is not None:
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
                 torch.save(replay_buffer, replay_buffer_path)
@@ -567,8 +578,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             rand_idx = torch.randint(2, (1,))
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
 
-            #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
-            # feat = feat[:, :, :5]
+            # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
+            # feat = feat[:, :, :8]
 
             #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
             # feat_noise = torch.randn_like(feat).detach()
@@ -828,17 +839,17 @@ def main_single(rank, FLAGS):
                           + '_NS' + str(FLAGS.num_steps)
                           + '_LR' + str(FLAGS.lr)
                           + '_LDim' + str(FLAGS.latent_dim)
-                          + '_KL' + str(int(FLAGS.kl))
-                          + '_SM' + str(int(FLAGS.sm))
+                          # + '_KL' + str(int(FLAGS.kl))
+                          # + '_SM' + str(int(FLAGS.sm))
                           + '_SN' + str(int(FLAGS.spectral_norm))
-                          + '_Mom' + str(FLAGS.momentum)
-                          + '_EMA' + str(int(FLAGS.sample_ema))
+                          # + '_Mom' + str(FLAGS.momentum)
+                          # + '_EMA' + str(int(FLAGS.sample_ema))
                           + '_RB' + str(int(FLAGS.replay_batch))
                           + '_AE' + str(int(FLAGS.autoencode))
-                          + '_FC' + str(int(FLAGS.forecast))
+                          # + '_FC' + str(int(FLAGS.forecast))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
                           + '_OID' + str(int(FLAGS.obj_id_embedding))
-                          + '_MMD' + str(int(FLAGS.mmd))
+                          # + '_MMD' + str(int(FLAGS.mmd))
                           + '_FE' + str(int(FLAGS.factor_encoder))
                           + '_NDL' + str(int(FLAGS.normalize_data_latent))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))
