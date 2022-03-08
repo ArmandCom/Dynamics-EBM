@@ -363,6 +363,7 @@ class ChargedParticles(data.Dataset):
 
         suffix = '_charged'+str(self.n_objects)
         suffix += '_nobox_05int-strength'
+        # suffix += 'inter0.5_nowalls_sf10'
 
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
