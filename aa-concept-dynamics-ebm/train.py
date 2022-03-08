@@ -303,8 +303,9 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        # TODO: put back in place
+        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
@@ -579,7 +580,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
 
             # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
-            # feat = feat[:, :, :8]
+            feat = feat[:, :, :10]
 
             #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
             # feat_noise = torch.randn_like(feat).detach()
