@@ -35,13 +35,18 @@ class SoS_loss(nn.Module):
             exp = np.array(rene)
         return exp   
 
-    def calcQ(self, V, x, rho):
+    def calcQ(self, V, x, kernelized = True):
         #  x: row vectors in veronese space
         # V is s-by-n where n is number of samples s is dimension
-        #  This function calculates Q values usinhg kernelized version
-        Q = torch.diag(x @ torch.t(x) - x @ V @ \
-        torch.inverse(rho*torch.eye(V.shape[1], device = self.gpu, requires_grad=False) + torch.t(V) @ V) \
-        @ torch.t(V) @ torch.t(x))
+
+        if kernelized:
+            #  This function calculates Q values usinhg kernelized version if kernelized is true
+            rho = self.rho_val(V) # Note: Added, might not be correct.
+            Q = torch.diag(x @ torch.t(x) - x @ V @ \
+            torch.inverse(rho*torch.eye(V.shape[1], device = self.gpu, requires_grad=False) + torch.t(V) @ V) \
+            @ torch.t(V) @ torch.t(x))
+        else:
+            Q =  x @ torch.inverse(((V @ torch.t(V)) / V.shape[1])) @ torch.t(x)
         return Q
 
     def veronese(self, X, n, powers=None):
@@ -80,9 +85,7 @@ class SoS_loss(nn.Module):
         # Commented out below is the secondary formulation for moments
         # Mx = rho * torch.eye(self.s, device = self.gpu, requires_grad=False) + (Vx @ torch.t(Vx)) / Vx.shape[1]
         Mx = (Vx @ torch.t(Vx)) / Vx.shape[1]
-
         return Mx
-
  
     def forward(self, Ms, Mt, U, source_tr, target_tr, label_source, use_squeeze = True):
         # You probably don't need this, this was specific to my project
