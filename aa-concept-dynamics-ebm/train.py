@@ -241,6 +241,8 @@ def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timeste
     return feat_neg, feat_negs_all, feat_neg_kl, feat_grad
 
 def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+    assert FLAGS.num_fixed_timesteps > 0 # In this case, we are encoding velocities and therefore we need at least one GT point.
+
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
@@ -260,7 +262,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
 
     feat_negs = []
 
-    feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
+    feat_clone = feat.clone() #.requires_grad_(requires_grad=False)
 
     # TODO: Sample from buffer.
     s = feat.size()
@@ -283,19 +285,34 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
     # feat_neg[fixed_points_mask] = feat_fixed[fixed_points_mask]
 
     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
-    feat_fixed = feat_fixed[:, :, :num_fixed_timesteps]
 
     feat_neg_kl = None
 
+
+    feat_var = torch.cat([feat_clone[:, :,  num_fixed_timesteps-1:num_fixed_timesteps],
+                          feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+
+
+    #### FEATURE TEST #### TODO: Not fine yet
+    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.001 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
+    delta_neg.requires_grad_(requires_grad=True)
+
+    feat_var_ini = feat_var[:, :, 0:1]
+    feat_var_list = [feat_var_ini]
+    current = feat_var_ini
+    for tt in range(delta_neg.shape[2]):
+        current = current + delta_neg[:, :, tt:tt+1]
+        feat_var_list.append(current)
+    feat_var = torch.cat(feat_var_list, dim=2)
+
+    if FLAGS.num_fixed_timesteps > 1:
+        feat_fixed = feat_clone[:, :, :num_fixed_timesteps - 1]
+        feat_neg = torch.cat([feat_fixed,
+                              feat_var], dim=2)
+    else: feat_neg = feat_var
+
     for i in range(num_steps):
         feat_noise.normal_()
-
-        if FLAGS.num_fixed_timesteps > 0:
-            feat_var = feat_neg[:, :,  num_fixed_timesteps:]
-            feat_neg = torch.cat([feat_fixed,
-                                  feat_var], dim=2)
-
-        else: feat_var = feat_neg
 
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
@@ -320,7 +337,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
             else:
                 energy = models[ii].forward(feat_neg, latent) + energy
         # Get grad for current optimization iteration.
-        feat_grad, = torch.autograd.grad([energy.sum()], [feat_var], create_graph=create_graph)
+        delta_grad, = torch.autograd.grad([energy.sum()], [delta_neg], create_graph=create_graph)
         # feat_grad_2, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph) # Note: Only to evaluate expression
 
         # TODO: Calculate grads without taking into account the fixed points.
@@ -343,23 +360,42 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
             feat_neg_kl = feat_neg
             rand_idx = torch.randint(2, (1,))
             energy = models[rand_idx].forward(feat_neg_kl, latent)
-            feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
-            feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
+
+            delta_grad_kl, = torch.autograd.grad([energy.sum()], [delta_neg], create_graph=create_graph)  # Create_graph true?
+            delta_neg_kl = delta_neg_kl - step_lr * delta_grad_kl #[:FLAGS.batch_size]
+
+
+            feat_var_kl = [feat_var_ini]
+            current = feat_var_ini
+            for tt in range(delta_neg_kl.shape[2]):
+                current = current + delta_neg[:, :, tt:tt+1]
+                feat_var.append(current)
+            feat_var_kl = torch.cat(feat_var_kl, dim=2)
+            if FLAGS.num_fixed_timesteps > 1:
+                feat_fixed = feat_clone[:, :, :num_fixed_timesteps - 1]
+                feat_neg_kl = torch.cat([feat_fixed,
+                                      feat_var_kl], dim=2)
             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
 
         ## Momentum update
         if FLAGS.momentum > 0:
-            update = FLAGS.step_lr * feat_grad + momentum * old_update
-            feat_var = feat_var - update # GD computation
+            update = FLAGS.step_lr * delta_grad + momentum * old_update
+            delta_neg = delta_neg - update # GD computation
             old_update = update
         else:
-            feat_var = feat_var - FLAGS.step_lr * feat_grad # GD computation
+            delta_neg = delta_neg - FLAGS.step_lr * delta_grad # GD computation
 
+        feat_var_list = [feat_var_ini]
+        current = feat_var_ini
+        for tt in range(delta_neg.shape[2]):
+            current = current + delta_neg[:, :, tt:tt+1]
+            feat_var_list.append(current)
+        feat_var = torch.cat(feat_var_list, dim=2)
 
-        #### FEATURE TEST #####
-        # feat_neg[fixed_points_mask] = feat_fixed[fixed_points_mask]
-        if num_fixed_timesteps > 0:
-            feat_neg = torch.cat([feat_fixed, feat_var], dim=2)
+        if FLAGS.num_fixed_timesteps > 1:
+            feat_fixed = feat_clone[:, :, :num_fixed_timesteps - 1]
+            feat_neg = torch.cat([feat_fixed,
+                                  feat_var], dim=2)
         else: feat_neg = feat_var
 
         # latents = latents
@@ -367,10 +403,10 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         feat_negs.append(feat_neg)
 
         #### FEATURE TEST ##### If commented out, backprop through all. (?)
-        feat_neg = feat_neg.detach()
-        feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+        feat_neg_out = feat_neg.detach()
+        # feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
-    return feat_neg, feat_negs, feat_neg_kl, feat_grad
+    return feat_neg_out, feat_negs, feat_neg_kl, delta_grad
 
 
 def sync_model(models): # Q: What is this about?
