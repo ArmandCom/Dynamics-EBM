@@ -40,7 +40,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 # Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
 DATASET_PATH = "./data"
 # Path to the folder where the pretrained models are saved
-CHECKPOINT_PATH = "./saved_models/tutorial8"
+CHECKPOINT_PATH = "./saved_models/tutorial8/reversed"
 
 # Setting the seed
 pl.seed_everything(42)
@@ -208,7 +208,7 @@ class Sampler:
 			inp_imgs.data.clamp_(min=-1.0, max=1.0)
 
 			# Part 2: calculate gradients for the current input.
-			out_imgs = -model(inp_imgs)
+			out_imgs = model(inp_imgs)
 			out_imgs.sum().backward()
 			inp_imgs.grad.data.clamp_(-0.03, 0.03) # For stabilizing and preventing too high gradients
 
@@ -271,7 +271,7 @@ class DeepEnergyModel(pl.LightningModule):
 
 		# Calculate losses
 		reg_loss = self.hparams.alpha * (real_out ** 2 + fake_out ** 2).mean()
-		cdiv_loss = fake_out.mean() - real_out.mean()
+		cdiv_loss = real_out.mean() - fake_out.mean()
 		loss = reg_loss + cdiv_loss
 
 		# Logging
@@ -291,7 +291,7 @@ class DeepEnergyModel(pl.LightningModule):
 		inp_imgs = torch.cat([real_imgs, fake_imgs], dim=0)
 		real_out, fake_out = self.cnn(inp_imgs).chunk(2, dim=0)
 
-		cdiv = fake_out.mean() - real_out.mean()
+		cdiv = real_out.mean() - fake_out.mean()
 		self.log('val_contrastive_divergence', cdiv)
 		self.log('val_fake_out', fake_out.mean())
 		self.log('val_real_out', real_out.mean())
