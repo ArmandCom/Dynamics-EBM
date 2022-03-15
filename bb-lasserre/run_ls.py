@@ -41,8 +41,8 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 # Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
 DATASET_PATH = "./data"
 # Path to the folder where the pretrained models are saved
-CHECKPOINT_PATH = "./saved_models/tutorial8"
-
+CHECKPOINT_PATH = "./saved_models/tutorial8_ls_kernel_optimized"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 # Setting the seed
 pl.seed_everything(42)
 
@@ -50,7 +50,8 @@ pl.seed_everything(42)
 torch.backends.cudnn.determinstic = True
 torch.backends.cudnn.benchmark = False
 
-device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+device_id = 2
+device = torch.device("cuda:"+str(device_id)) if torch.cuda.is_available() else torch.device("cpu")
 print("Device:", device)
 
 import urllib.request
@@ -93,8 +94,9 @@ test_set = MNIST(root=DATASET_PATH, train=False, transform=transform, download=T
 # We define a set of data loaders that we can use for various purposes later.
 # Note that for actually training a model, we will use different data loaders
 # with a lower batch size.
-train_loader = data.DataLoader(train_set, batch_size=128, shuffle=True,  drop_last=True,  num_workers=4, pin_memory=True)
-test_loader  = data.DataLoader(test_set,  batch_size=256, shuffle=False, drop_last=False, num_workers=4)
+n_workers = 4
+train_loader = data.DataLoader(train_set, batch_size=128, shuffle=True,  drop_last=True,  num_workers=n_workers, pin_memory=True)
+test_loader  = data.DataLoader(test_set,  batch_size=256, shuffle=False, drop_last=False, num_workers=n_workers)
 
 ### Note: Model ###
 class Swish(nn.Module):
@@ -105,13 +107,15 @@ class Swish(nn.Module):
 
 class CNNModel(nn.Module):
 
-	def __init__(self, hidden_features=32, out_dim=10, **kwargs):
+	def __init__(self, hidden_features=32, num_samples_sos=1001, **kwargs):
 		# Note: Same depth but last layer is of higher dimension
 		super().__init__()
 		# We increase the hidden dimension over layers. Here pre-calculated for simplicity.
 		c_hid1 = hidden_features//2
 		c_hid2 = hidden_features
 		c_hid3 = hidden_features*2
+
+		out_dim = kwargs['out_dim']
 
 		self.kernelized = True
 
@@ -128,18 +132,32 @@ class CNNModel(nn.Module):
 			nn.Flatten(),
 			nn.Linear(c_hid3*4, c_hid3),
 			Swish(), # Only keep the las
-			nn.Linear(c_hid3, out_dim)
+			nn.Linear(c_hid3, out_dim),
+			nn.Softplus(), # Note: Seems like all values must be positive for the Veronesse map current formulation.
 		)
 
-		self.sos = SoS_loss(out_dim, mord=4, gpu_id=0)
-		self.register_buffer('V', self.sos.vmap(torch.randn(1000, out_dim)))
+		self.sos = SoS_loss(out_dim, mord=4, num_samples=num_samples_sos, gpu_id=device)
+		self.register_buffer('V', self.sos.vmap(torch.randn(self.sos.s, out_dim).abs().to(device)))
+		self.update_Minv()
 
 	def update_V(self, X):
-		self.V = self.sos.vmap(X)
+		self.V = self.sos.vmap(X).detach().to(device)
+
+	def update_Minv(self):
+		if self.kernelized:
+			self.Minv = self.V @ \
+						torch.inverse(self.sos.rho_val(self.V)*
+									  torch.eye(self.V.shape[1], device = device, requires_grad=False)
+											   + torch.t(self.V) @ self.V) @ torch.t(self.V)
+		else: self.Minv = torch.inverse(((self.V @ torch.t(self.V)) / self.V.shape[1]))
 
 	def forward(self, x, sample_features=False):
 		x = self.cnn_layers(x)
-		e = self.calcQ(self.V, x, kernelized=self.kernelized)
+		if self.V.device != x.device:
+			self.V = self.V.to(device) # TODO: This is very inefficient.
+		if self.Minv.device != x.device: self.Minv = self.Minv.to(device)
+		# Note: precompute Minv
+		e = self.sos.calcQ(self.V, self.sos.vmap(x).permute(1, 0), self.Minv, kernelized=self.kernelized)
 		if sample_features:
 			return x, e
 		else: return e
@@ -147,7 +165,7 @@ class CNNModel(nn.Module):
 ### Note: Sampler / Buffer ###
 class Sampler:
 
-	def __init__(self, model, img_shape, sample_size, max_len=8192):
+	def __init__(self, model, img_shape, sample_size, max_len=8192, initialize_list=True):
 		"""
 		Inputs:
 			model - Neural network to use for modeling E_theta
@@ -160,7 +178,9 @@ class Sampler:
 		self.img_shape = img_shape
 		self.sample_size = sample_size
 		self.max_len = max_len
-		self.examples = [(torch.rand((1,)+img_shape)*2-1) for _ in range(self.sample_size)]
+		if initialize_list:
+			self.examples = [(torch.rand((1,)+img_shape)*2-1) for _ in range(self.sample_size)]
+		else: self.examples = []
 
 	def sample_new_exmps(self, steps=60, step_size=10):
 		"""
@@ -267,17 +287,17 @@ class Sampler:
 ### Note: Training / Overall Model ###
 class DeepEnergyModel(pl.LightningModule):
 
-	def __init__(self, img_shape, batch_size, num_samples_sos=1000, m_interval = 100, alpha=0.1, lr=1e-4, beta1=0.0, **CNN_args):
+	def __init__(self, img_shape, batch_size, num_samples_sos=1000, m_interval = 250, alpha=0.1, lr=1e-4, beta1=0.0, **CNN_args):
 		super().__init__()
 		self.save_hyperparameters()
 
 		self.m_interval = m_interval
 		self.num_samples_sos = num_samples_sos
 
-		self.cnn = CNNModel(**CNN_args)
+		self.cnn = CNNModel(num_samples_sos = num_samples_sos, **CNN_args)
 		self.sampler = Sampler(self.cnn, img_shape=img_shape, sample_size=batch_size)
-		self.feat_buffer = Sampler(self.cnn, img_shape=CNN_args['out_dim'], sample_size=batch_size,
-								   max_len=num_samples_sos) # Max len here will be the number of samples to calculate
+		self.feat_buffer = Sampler(self.cnn, img_shape=(CNN_args['out_dim'],), sample_size=batch_size,
+								   max_len=num_samples_sos, initialize_list=False) # Max len here will be the number of samples to calculate
 		self.example_input_array = torch.zeros(1, *img_shape)
 
 	def forward(self, x):
@@ -305,12 +325,13 @@ class DeepEnergyModel(pl.LightningModule):
 
 		feat, es = self.cnn(inp_imgs, sample_features=True)
 		real_out, fake_out = es.chunk(2, dim=0)
-		self.feat_buffer.save_features(feat.chunk(2, dim=0)[0]) # Add the real features to the buffer
+		self.feat_buffer.save_features(feats=feat.chunk(2, dim=0)[0]) # Add the real features to the buffer
 
 		if (len(self.feat_buffer.examples) >= self.num_samples_sos
 			and batch_idx % self.m_interval == 0):
-			self.cnn.V = self.cnn.sos.vmap( torch.cat(self.feat_buffer.examples) )
-
+			self.cnn.update_V( torch.cat(self.feat_buffer.examples) )
+			self.cnn.update_Minv()
+			# print('Regenerating V \n')
 
 
 		# Calculate losses
@@ -407,7 +428,7 @@ class OutlierCallback(pl.Callback):
 def train_model(**kwargs):
 	# Create a PyTorch Lightning trainer with the generation callback
 	trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, "MNIST"),
-						 gpus=1 if str(device).startswith("cuda") else 0,
+						 gpus=[device_id] if str(device).startswith("cuda") else 0,
 						 max_epochs=60,
 						 gradient_clip_val=0.1,
 						 callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence'),
@@ -435,10 +456,11 @@ if __name__ == '__main__':
 	### Note: Create model ###
 	model = train_model(img_shape=(1,28,28),
 						batch_size=train_loader.batch_size,
-						num_samples_sos = 1000, #Num of samles needed for matrix M
+						num_samples_sos = 1200, #Num of samles needed for matrix M
 						lr=1e-4,
 						beta1=0.0,
-						CNNModel = {'out_dim': 10} # Dimensionality of the latent space
+						out_dim=10
+						# CNNModel = {'out_dim': 10} # Dimensionality of the latent space
 						)
 
 	print('Train done!')

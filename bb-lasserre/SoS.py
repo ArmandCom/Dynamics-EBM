@@ -5,23 +5,25 @@ import numpy as np
 from scipy.linalg import fractional_matrix_power
 
 class SoS_loss(nn.Module):
-    def __init__(self, d, mord=1, gpu_id=0):
-        DEVICE = torch.device('cuda:%d'%gpu_id if torch.cuda.is_available() else 'cpu')
-        self.gpu = DEVICE
+    def __init__(self, d, mord=1, gpu_id=None, num_samples = None):
+        self.gpu = gpu_id
         super(SoS_loss, self).__init__()
         self.mord = mord
         s = int(sp.binom(mord+d,mord))
         self.s = s
-        Ad = torch.zeros((s,s), device = DEVICE, requires_grad=False)
-        for i in range(s):
-            Ad[i][s-i-1] = 1
-        self.Ad = Ad
+        if num_samples is None:
+            num_samples = s
+        # Ad = torch.zeros((s,s), device = DEVICE, requires_grad=False)
+        # for i in range(s):
+        #     Ad[i][s-i-1] = 1
+        # self.Ad = Ad
         # You will need to calculate power parameter, you don't need the stuff above
         powers = []
         for i in range(2,mord+1):
-            powers.append(self.exponent(i,d))
+            powers.append(torch.from_numpy(self.exponent(i,d)).type(torch.FloatTensor))
         self.powers = powers
-        
+        self.ones = torch.ones((1, num_samples), device = self.gpu, requires_grad=False)
+        # self.register_buffer('powers', powers)
 
     def exponent(self, n, K):
         # Credit: python implementation from the original MATLAb code of Rene Vidal, 2013
@@ -35,30 +37,40 @@ class SoS_loss(nn.Module):
             exp = np.array(rene)
         return exp   
 
-    def calcQ(self, V, x, kernelized = True):
+    def calcQ(self, V, x, Minv=None, kernelized=True):
         #  x: row vectors in veronese space
         # V is s-by-n where n is number of samples s is dimension
 
         if kernelized:
             #  This function calculates Q values usinhg kernelized version if kernelized is true
-            rho = self.rho_val(V) # Note: Added, might not be correct.
-            Q = torch.diag(x @ torch.t(x) - x @ V @ \
-            torch.inverse(rho*torch.eye(V.shape[1], device = self.gpu, requires_grad=False) + torch.t(V) @ V) \
-            @ torch.t(V) @ torch.t(x))
+            if Minv is None:
+                rho = self.rho_val(V) # Note: Added, might not be correct.
+                Minv = V @ \
+                torch.inverse(rho*torch.eye(V.shape[1], device = x.device, requires_grad=False) + torch.t(V) @ V) \
+                @ torch.t(V)
+            Q = torch.diag(x @ torch.t(x) - x @ Minv @ torch.t(x))
         else:
-            Q =  x @ torch.inverse(((V @ torch.t(V)) / V.shape[1])) @ torch.t(x)
+            if Minv is None:
+                Minv = torch.inverse(((V @ torch.t(V)) / V.shape[1]))
+            Q = x @ Minv @ torch.t(x) # Note: to test
         return Q
 
     def veronese(self, X, n, powers=None):
         if n==0:
-            y = torch.ones((1,X.shape[1]), device = self.gpu, requires_grad=False)
+            y = self.ones[:, :X.shape[1]] # device = self.gpu,
+            if y.device != X.device:
+                y = y.to(X.device)
         elif n==1:
             y = X
         else:
+            if X.min() < 0:
+                raise ValueError("Negative values not allowed")
             if powers.any()==None:
                 raise ValueError("powers cannot be None for mord>=2")
-            X[torch.abs(X)<1e-10] = 1e-10
-            y = torch.exp(torch.from_numpy(powers).to(self.gpu).type(torch.cuda.FloatTensor) @ torch.log(X))
+            X = torch.clamp(X, min=1e-10)
+            y = torch.exp( powers
+                          # .to(self.gpu).type(torch.cuda.FloatTensor)
+                           @ torch.log(X)) # Note: Method to accelerate computation. Log doesn't take negative values.
 
         return y     
 
@@ -69,6 +81,8 @@ class SoS_loss(nn.Module):
         # vx = torch.cat((self.veronese(torch.t(X), 0).type(dtype), self.veronese(torch.t(X),1).type(dtype)),0)
 
         p = 0
+        if self.powers[0].device != X.device:
+            self.powers = [self.powers[pi].to(X.device) for pi in range(len(self.powers))]
         for i in range(2,self.mord+1):
             vx = torch.cat((vx, self.veronese(torch.t(X), i, self.powers[p])),0)
             p+=1
