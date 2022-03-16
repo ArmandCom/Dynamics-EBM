@@ -40,10 +40,11 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
 
 # Path to the folder where the pretrained models are saved
-CHECKPOINT_PATH = "./saved_models/tutorial8_dt_trainletters_dim10" #ls_kernel_optimized
+CHECKPOINT_PATH = "./saved_models/tutorial8_dt_dim10_frozen" #ls_kernel_optimized
+print(CHECKPOINT_PATH)
 # CHECKPOINT_PATH = "./saved_models/tutorial8_dt_test" #ls_kernel_optimized
 # asdf
-n_workers = 0
+n_workers = 4
 device_id = 0
 
 # Setting the seed
@@ -124,8 +125,8 @@ class CNNModel(nn.Module):
 
 		out_dim = kwargs['out_dim']
 
-		self.kernelized = False
-
+		self.freeze = True
+		self.kernelized = True
 		# Series of convolutions and Swish activation functions
 		self.cnn_layers = nn.Sequential(
 			nn.Conv2d(1, c_hid1, kernel_size=5, stride=2, padding=4), # [16x16] - Larger padding to get 32x32 image
@@ -139,9 +140,12 @@ class CNNModel(nn.Module):
 			nn.Flatten(),
 			nn.Linear(c_hid3*4, c_hid3),
 			Swish(), # Only keep the las
-			nn.Linear(c_hid3, out_dim),
-			nn.Softplus(), # Note: Seems like all values must be positive for the Veronesse map current formulation.
 		)
+		self.cnn_projection = nn.Sequential(
+			nn.Linear(c_hid3, c_hid3),
+			Swish(),
+			nn.Linear(c_hid3, out_dim),
+			nn.Softplus()) # Note: Seems like all values must be positive for the Veronesse map current formulation.
 
 		self.sos = SoS_loss(out_dim, mord=4, num_samples=num_samples_sos, gpu_id=device)
 		self.register_buffer('V', self.sos.vmap(torch.randn(self.sos.s, out_dim).abs().to(device)))
@@ -159,7 +163,11 @@ class CNNModel(nn.Module):
 		else: self.Minv = torch.inverse(((self.V @ torch.t(self.V)) / self.V.shape[1]))
 
 	def forward(self, x, sample_features=False):
-		x = self.cnn_layers(x)
+		if self.freeze:
+			with torch.no_grad():
+				x = self.cnn_layers(x)
+		else: x = self.cnn_layers(x)
+		x = self.cnn_projection(x)
 		if self.V.device != x.device:
 			self.V = self.V.to(device) # TODO: This is very inefficient.
 		if self.Minv.device != x.device: self.Minv = self.Minv.to(device)
@@ -265,7 +273,12 @@ class Sampler:
 			inp_imgs.data.clamp_(min=-1.0, max=1.0)
 
 			# Part 2: calculate gradients for the current input.
-			out_imgs = model(inp_imgs)
+			if model.freeze:
+				model.freeze = False
+				out_imgs = model(inp_imgs)
+				model.freeze = True
+			else: out_imgs = model(inp_imgs)
+
 			out_imgs.sum().backward()
 			inp_imgs.grad.data.clamp_(-0.03, 0.03) # For stabilizing and preventing too high gradients
 
@@ -312,6 +325,21 @@ class DeepEnergyModel(pl.LightningModule):
 	def forward(self, x):
 		z = self.cnn(x)
 		return z
+
+	def load_partial_state_dict(self, state_dict, freeze=True):
+
+		own_state = self.state_dict()#
+		state_dict = torch.load(state_dict)['state_dict']
+		for name, param in state_dict.items():
+			if name not in own_state:
+				print(name)
+				print()
+				continue
+			if isinstance(param, nn.Parameter):
+				# backwards compatibility for serialized parameters
+				param = param.data
+			own_state[name].copy_(param)
+		self.load_state_dict(own_state)
 
 	def configure_optimizers(self):
 		# Energy models can have issues with momentum as the loss surfaces changes with its parameters.
@@ -593,15 +621,29 @@ def train_model(**kwargs):
 									LearningRateMonitor("epoch")
 									],
 						 progress_bar_refresh_rate=1)
-	# Check whether pretrained model exists. If yes, load it and skip training
-	# pretrained_filename = os.path.join(CHECKPOINT_PATH, "MNIST.ckpt")
-	# if os.path.isfile(pretrained_filename):
-	# 	print("Found pretrained model, loading...")
-	# 	model = DeepEnergyModel.load_from_checkpoint(pretrained_filename)
 	# else:
 	# Note: Do training
 	pl.seed_everything(42)
 	model = DeepEnergyModel(**kwargs)
+
+	# Note: Trying partial feature
+	# Check whether pretrained model exists. If yes, load it and skip training
+	pretrained_filename = os.path.join(CHECKPOINT_PATH, "MNIST.ckpt")
+
+	# pretrained_dict = ...
+	# model_dict = model.state_dict()
+	#
+	# # 1. filter out unnecessary keys
+	# pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+	# # 2. overwrite entries in the existing state dict
+	# model_dict.update(pretrained_dict)
+	# # 3. load the new state dict
+	# model.load_state_dict(pretrained_dict)
+
+	if os.path.isfile(pretrained_filename):
+		print("Found pretrained model, loading...")
+		model.load_partial_state_dict(pretrained_filename)
+
 	trainer.fit(model, train_loader, test_loader)
 	model = DeepEnergyModel.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
 	# No testing as we are more interested in other properties
