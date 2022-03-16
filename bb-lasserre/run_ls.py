@@ -28,7 +28,7 @@ import torch.utils.data as data
 import torch.optim as optim
 # Torchvision
 import torchvision
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST, EMNIST, KMNIST
 from torchvision import transforms
 # PyTorch Lightning
 # try:
@@ -41,8 +41,11 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 # Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
 DATASET_PATH = "./data"
 # Path to the folder where the pretrained models are saved
-CHECKPOINT_PATH = "./saved_models/tutorial8_ls_kernel_optimized"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+CHECKPOINT_PATH = "./saved_models/tutorial8_dt_trainletters_dim10" #ls_kernel_optimized
+# CHECKPOINT_PATH = "./saved_models/tutorial8_dt_test" #ls_kernel_optimized
+n_workers = 4
+device_id = 0
+
 # Setting the seed
 pl.seed_everything(42)
 
@@ -50,7 +53,7 @@ pl.seed_everything(42)
 torch.backends.cudnn.determinstic = True
 torch.backends.cudnn.benchmark = False
 
-device_id = 2
+device_id = 0
 device = torch.device("cuda:"+str(device_id)) if torch.cuda.is_available() else torch.device("cpu")
 print("Device:", device)
 
@@ -86,15 +89,16 @@ transform = transforms.Compose([transforms.ToTensor(),
 								])
 
 # Loading the training dataset. We need to split it into a training and validation part
-train_set = MNIST(root=DATASET_PATH, train=True, transform=transform, download=True)
+# train_set = MNIST(root=DATASET_PATH, train=True, transform=transform, download=True)
+test_set = MNIST(root=DATASET_PATH, train=False, transform=transform, download=True)
 
 # Loading the test set
-test_set = MNIST(root=DATASET_PATH, train=False, transform=transform, download=True)
+train_set = EMNIST(root=DATASET_PATH, train=True, split='letters', transform=transform, download=True)
+# test_set = EMNIST(root=DATASET_PATH, train=False, split='letters', transform=transform, download=True)
 
 # We define a set of data loaders that we can use for various purposes later.
 # Note that for actually training a model, we will use different data loaders
 # with a lower batch size.
-n_workers = 4
 train_loader = data.DataLoader(train_set, batch_size=128, shuffle=True,  drop_last=True,  num_workers=n_workers, pin_memory=True)
 test_loader  = data.DataLoader(test_set,  batch_size=256, shuffle=False, drop_last=False, num_workers=n_workers)
 
@@ -117,7 +121,7 @@ class CNNModel(nn.Module):
 
 		out_dim = kwargs['out_dim']
 
-		self.kernelized = True
+		self.kernelized = False
 
 		# Series of convolutions and Swish activation functions
 		self.cnn_layers = nn.Sequential(
@@ -287,7 +291,7 @@ class Sampler:
 ### Note: Training / Overall Model ###
 class DeepEnergyModel(pl.LightningModule):
 
-	def __init__(self, img_shape, batch_size, num_samples_sos=1000, m_interval = 250, alpha=0.1, lr=1e-4, beta1=0.0, **CNN_args):
+	def __init__(self, img_shape, batch_size, num_samples_sos=1000, m_interval = 50, alpha=0.1, lr=1e-4, beta1=0.0, **CNN_args):
 		super().__init__()
 		self.save_hyperparameters()
 
@@ -298,6 +302,8 @@ class DeepEnergyModel(pl.LightningModule):
 		self.sampler = Sampler(self.cnn, img_shape=img_shape, sample_size=batch_size)
 		self.feat_buffer = Sampler(self.cnn, img_shape=(CNN_args['out_dim'],), sample_size=batch_size,
 								   max_len=num_samples_sos, initialize_list=False) # Max len here will be the number of samples to calculate
+		self.feat_buffer_test = Sampler(self.cnn, img_shape=(CNN_args['out_dim'],), sample_size=test_loader.batch_size,
+								   max_len=num_samples_sos, initialize_list=False)
 		self.example_input_array = torch.zeros(1, *img_shape)
 
 	def forward(self, x):
@@ -406,6 +412,26 @@ class SamplerCallback(pl.Callback):
 			grid = torchvision.utils.make_grid(exmp_imgs, nrow=4, normalize=True, range=(-1,1))
 			trainer.logger.experiment.add_image("sampler", grid, global_step=trainer.current_epoch)
 
+class DataCallback(pl.Callback):
+
+	def __init__(self, dataloader, num_imgs=32, every_n_epochs=5):
+		super().__init__()
+		self.num_imgs = num_imgs             # Number of images to plot
+		self.every_n_epochs = every_n_epochs # Only save those images every N epochs (otherwise tensorboard gets quite large)
+		self.dataloader = dataloader
+
+	def on_epoch_end(self, trainer, pl_module):
+		if trainer.current_epoch % self.every_n_epochs == 0:
+			len = 0
+			all_imgs = []
+			while len < self.num_imgs:
+				data_imgs,_ = next(iter(self.dataloader))
+				all_imgs.append(data_imgs)
+				len += data_imgs.shape[0]
+			exmp_imgs = torch.cat(all_imgs, dim=0)[:self.num_imgs]
+			grid = torchvision.utils.make_grid(exmp_imgs, nrow=4, normalize=True, range=(-1,1))
+			trainer.logger.experiment.add_image("original_imgs_train{}".format(int(self.dataloader.dataset.train)), grid, global_step=trainer.current_epoch)
+
 class OutlierCallback(pl.Callback):
 
 	def __init__(self, batch_size=1024):
@@ -422,6 +448,56 @@ class OutlierCallback(pl.Callback):
 
 		trainer.logger.experiment.add_scalar("rand_out", rand_out, global_step=trainer.current_epoch)
 
+class TransferCallback(pl.Callback):
+
+	def __init__(self, dataloader, num_samples=1001, batch_size=8, vis_steps=8, num_steps=256, every_n_epochs=5):
+		super().__init__()
+		self.dataloader = dataloader
+		self.batch_size = batch_size         # Number of images to generate
+		self.vis_steps = vis_steps           # Number of steps within generation to visualize
+		self.num_steps = num_steps           # Number of steps to take during generation
+		self.every_n_epochs = every_n_epochs # Only save those images every N epochs (otherwise tensorboard gets quite large)
+		self.num_samples = num_samples
+
+	def on_epoch_end(self, trainer, pl_module):
+		# Skip for all other epochs
+		if trainer.current_epoch % self.every_n_epochs == 0:
+
+			# Modify V and Minv with the new data and sample according to it.
+			with torch.no_grad():
+				len = 0
+				# test_imgs = []
+				while len < self.num_samples:
+					data_imgs,_ = next(iter(self.dataloader))
+					pl_module.feat_buffer_test.save_features(inputs=data_imgs.to(device))
+					len += data_imgs.shape[0]
+				pl_module.cnn.update_V( torch.cat(pl_module.feat_buffer_test.examples) )
+				pl_module.cnn.update_Minv()
+			# Generate images
+			imgs_per_step = self.generate_imgs(pl_module)
+
+			# Plot and add to tensorboard
+			for i in range(imgs_per_step.shape[1]):
+				step_size = self.num_steps // self.vis_steps
+				imgs_to_plot = imgs_per_step[step_size-1::step_size,i]
+				grid = torchvision.utils.make_grid(imgs_to_plot, nrow=imgs_to_plot.shape[0], normalize=True, range=(-1,1))
+				trainer.logger.experiment.add_image(f"generation_letter_{i}", grid, global_step=trainer.current_epoch)
+
+			# V and Minv back to training mode
+			if trainer.current_epoch > 0:
+				pl_module.cnn.update_V( torch.cat(pl_module.feat_buffer.examples) )
+				pl_module.cnn.update_Minv()
+
+
+	def generate_imgs(self, pl_module):
+		pl_module.eval()
+		start_imgs = torch.rand((self.batch_size,) + pl_module.hparams["img_shape"]).to(pl_module.device)
+		start_imgs = start_imgs * 2 - 1
+		torch.set_grad_enabled(True)  # Tracking gradients for sampling necessary
+		imgs_per_step = Sampler.generate_samples(pl_module.cnn, start_imgs, steps=self.num_steps, step_size=10, return_img_per_step=True)
+		torch.set_grad_enabled(False)
+		pl_module.train()
+		return imgs_per_step
 
 
 ### Note: Running model ###
@@ -429,12 +505,17 @@ def train_model(**kwargs):
 	# Create a PyTorch Lightning trainer with the generation callback
 	trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, "MNIST"),
 						 gpus=[device_id] if str(device).startswith("cuda") else 0,
-						 max_epochs=60,
+						 max_epochs=100,
 						 gradient_clip_val=0.1,
 						 callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence'),
 									GenerateCallback(every_n_epochs=5),
-									SamplerCallback(every_n_epochs=5),
+									SamplerCallback(every_n_epochs=1),
 									OutlierCallback(),
+									TransferCallback(test_loader,
+													 num_samples=kwargs['num_samples_sos'],
+													 every_n_epochs=1, num_steps=512),
+									DataCallback(train_loader, num_imgs=32, every_n_epochs=20),
+									DataCallback(test_loader, num_imgs=32, every_n_epochs=20),
 									LearningRateMonitor("epoch")
 									],
 						 progress_bar_refresh_rate=1)
@@ -456,7 +537,7 @@ if __name__ == '__main__':
 	### Note: Create model ###
 	model = train_model(img_shape=(1,28,28),
 						batch_size=train_loader.batch_size,
-						num_samples_sos = 1200, #Num of samles needed for matrix M
+						num_samples_sos = 15000, #Num of samles needed for matrix M
 						lr=1e-4,
 						beta1=0.0,
 						out_dim=10
@@ -484,6 +565,8 @@ if __name__ == '__main__':
 				   labels=[1] + list(range(step_size,imgs_per_step.shape[0]+1,step_size)))
 		plt.yticks([])
 		plt.show()
+
+	### Note: Domain Transfer generation ###
 
 	### Note: OOD detection ###
 	# with torch.no_grad():

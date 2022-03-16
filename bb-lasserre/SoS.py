@@ -22,7 +22,8 @@ class SoS_loss(nn.Module):
         for i in range(2,mord+1):
             powers.append(torch.from_numpy(self.exponent(i,d)).type(torch.FloatTensor))
         self.powers = powers
-        self.ones = torch.ones((1, num_samples), device = self.gpu, requires_grad=False)
+        self.ones = torch.ones((1, num_samples * 2), device = self.gpu, requires_grad=False)
+        # TODO: check if this is correct. It might not be because ones oddly depends on the batchsize.
         # self.register_buffer('powers', powers)
 
     def exponent(self, n, K):
