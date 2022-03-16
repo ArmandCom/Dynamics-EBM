@@ -38,16 +38,19 @@ from torchvision import transforms
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
-# Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
-DATASET_PATH = "./data"
+
 # Path to the folder where the pretrained models are saved
 CHECKPOINT_PATH = "./saved_models/tutorial8_dt_trainletters_dim10" #ls_kernel_optimized
 # CHECKPOINT_PATH = "./saved_models/tutorial8_dt_test" #ls_kernel_optimized
-n_workers = 4
+# asdf
+n_workers = 0
 device_id = 0
 
 # Setting the seed
 pl.seed_everything(42)
+
+# Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
+DATASET_PATH = "./data"
 
 # Ensure that all operations are deterministic on GPU (if used) for reproducibility
 torch.backends.cudnn.determinstic = True
@@ -499,6 +502,74 @@ class TransferCallback(pl.Callback):
 		pl_module.train()
 		return imgs_per_step
 
+class TrainTransferCompCallback(pl.Callback):
+
+	def __init__(self, train_dataloader, test_dataloader, num_samples=1001, batch_size=8, vis_steps=8, num_steps=256, every_n_epochs=5):
+		super().__init__()
+		self.train_dataloader = train_dataloader
+		self.test_dataloader  = test_dataloader
+		self.batch_size = batch_size         # Number of images to generate
+		self.vis_steps = vis_steps           # Number of steps within generation to visualize
+		self.num_steps = num_steps           # Number of steps to take during generation
+		self.every_n_epochs = every_n_epochs # Only save those images every N epochs (otherwise tensorboard gets quite large)
+		self.num_samples = num_samples
+
+	def on_epoch_end(self, trainer, pl_module):
+		# Skip for all other epochs
+		if trainer.current_epoch % self.every_n_epochs == 0:
+
+
+			start_imgs = torch.rand((self.batch_size,) + pl_module.hparams["img_shape"]).to(pl_module.device)
+			start_imgs = start_imgs * 2 - 1
+
+			# Modify V and Minv with the new data and sample according to it.
+			with torch.no_grad():
+				len = 0
+				# test_imgs = []
+				while len < self.num_samples:
+					data_imgs,_ = next(iter(self.test_dataloader))
+					pl_module.feat_buffer_test.save_features(inputs=data_imgs.to(device))
+					len += data_imgs.shape[0]
+				pl_module.cnn.update_V( torch.cat(pl_module.feat_buffer_test.examples) )
+				pl_module.cnn.update_Minv()
+			# Generate images
+			imgs_per_step_test = self.generate_imgs(pl_module, start_imgs)
+
+			# Modify V and Minv with the new data and sample according to it.
+			with torch.no_grad():
+				len = 0
+				# test_imgs = []
+				while len < self.num_samples:
+					data_imgs,_ = next(iter(self.train_dataloader))
+					pl_module.feat_buffer.save_features(inputs=data_imgs.to(device))
+					len += data_imgs.shape[0]
+				pl_module.cnn.update_V( torch.cat(pl_module.feat_buffer.examples) )
+				pl_module.cnn.update_Minv()
+			# Generate images
+			imgs_per_step_train = self.generate_imgs(pl_module, start_imgs)
+
+			imgs_per_step = torch.cat([imgs_per_step_train, imgs_per_step_test], dim=-1)
+
+			# V and Minv back to training mode
+			if trainer.current_epoch > 0:
+				pl_module.cnn.update_V( torch.cat(pl_module.feat_buffer.examples) )
+				pl_module.cnn.update_Minv()
+
+			# Plot and add to tensorboard
+			for i in range(imgs_per_step.shape[1]):
+				step_size = self.num_steps // self.vis_steps
+				imgs_to_plot = imgs_per_step[step_size-1::step_size,i]
+				grid = torchvision.utils.make_grid(imgs_to_plot, nrow=imgs_to_plot.shape[0], normalize=True, range=(-1,1))
+				trainer.logger.experiment.add_image(f"generation_train-test_{i}", grid, global_step=trainer.current_epoch)
+
+
+	def generate_imgs(self, pl_module, start_imgs):
+		pl_module.eval()
+		torch.set_grad_enabled(True)  # Tracking gradients for sampling necessary
+		imgs_per_step = Sampler.generate_samples(pl_module.cnn, start_imgs, steps=self.num_steps, step_size=10, return_img_per_step=True)
+		torch.set_grad_enabled(False)
+		pl_module.train()
+		return imgs_per_step
 
 ### Note: Running model ###
 def train_model(**kwargs):
@@ -508,12 +579,15 @@ def train_model(**kwargs):
 						 max_epochs=100,
 						 gradient_clip_val=0.1,
 						 callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence'),
-									GenerateCallback(every_n_epochs=5),
+									# GenerateCallback(every_n_epochs=5),
 									SamplerCallback(every_n_epochs=1),
 									OutlierCallback(),
-									TransferCallback(test_loader,
-													 num_samples=kwargs['num_samples_sos'],
-													 every_n_epochs=1, num_steps=512),
+									# TransferCallback(test_loader,
+									# 				 num_samples=kwargs['num_samples_sos'],
+									# 				 every_n_epochs=1, num_steps=512),
+									TrainTransferCompCallback(train_loader, test_loader,
+															  num_samples=kwargs['num_samples_sos'],
+															  every_n_epochs=5, num_steps=512),
 									DataCallback(train_loader, num_imgs=32, every_n_epochs=20),
 									DataCallback(test_loader, num_imgs=32, every_n_epochs=20),
 									LearningRateMonitor("epoch")
