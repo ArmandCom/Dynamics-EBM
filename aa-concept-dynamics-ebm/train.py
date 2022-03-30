@@ -32,7 +32,7 @@ import random
 # from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
     linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
-    normalize_trajectories, augment_trajectories, MMD, align_replayed_batch
+    normalize_trajectories, augment_trajectories, MMD, align_replayed_batch, get_rel_pairs
 from pathlib import Path
 
 # --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
@@ -78,8 +78,8 @@ parser.add_argument('--lr', default=3e-4, type=float, help='learning rate for tr
 parser.add_argument('--log_interval', default=100, type=int, help='log outputs every so many batches')
 parser.add_argument('--save_interval', default=2000, type=int, help='save outputs every so many batches')
 parser.add_argument('--autoencode', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
-parser.add_argument('--forecast', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
-parser.add_argument('--independent_energies', action='store_true', help='Use Edge graph ebm')
+# parser.add_argument('--forecast', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
+parser.add_argument('--forecast', default=-1, type=int, help='forecast N steps in the future (the encoder only sees the previous). -1 invalidates forecasting')
 parser.add_argument('--cd_and_ae', action='store_true', help='if set to True we use L2 loss and Contrastive Divergence')
 
 # data
@@ -240,7 +240,119 @@ def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timeste
     FLAGS.num_fixed_timesteps = num_fixed_timesteps_old
     return feat_neg, feat_negs_all, feat_neg_kl, feat_grad
 
-def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+    feat_noise = torch.randn_like(feat_neg).detach()
+    feat_negs_samples = []
+
+    num_fixed_timesteps = FLAGS.num_fixed_timesteps
+
+    ## Step
+    step_lr = FLAGS.step_lr
+    ini_step_lr = step_lr
+
+    ## Noise
+    noise_coef = FLAGS.noise_coef
+    ini_noise_coef = noise_coef
+
+    ## Momentum parameters
+    momentum = FLAGS.momentum
+    old_update = 0.0
+
+    feat_negs = [feat_neg]
+
+    feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
+    feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
+
+    # TODO: Sample from buffer.
+    s = feat.size()
+
+    # Num steps linear annealing
+    if not sample:
+        if FLAGS.num_steps_end != -1 and training_step > 0:
+            num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+
+        #### FEATURE TEST ##### varying fixed steps
+        # if random.random() < 0.5:
+        #     num_fixed_timesteps = random.randint(3, num_fixed_timesteps)
+        #### FEATURE TEST #####
+
+    if FLAGS.num_fixed_timesteps > 0:
+        feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+                              feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+    feat_neg_kl = None
+
+    for i in range(num_steps):
+        feat_noise.normal_()
+
+        ## Step - LR
+        if FLAGS.step_lr_decay_factor != 1.0:
+            step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+        ## Add Noise
+        if FLAGS.noise_decay_factor != 1.0:
+            noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
+        feat_neg = feat_neg + noise_coef * feat_noise
+
+        # Smoothing
+        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+
+        # Compute energy
+        latent_ii, mask = latent
+        energy = 0
+        for ii in range(2):
+            if ii == 1: latent = (latent_ii, 1 - mask)
+            if FLAGS.sample_ema:
+                energy = models_ema[ii].forward(feat_neg, latent) + energy
+            else:
+                energy = models[ii].forward(feat_neg, latent) + energy
+        # Get grad for current optimization iteration.
+        feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
+
+        #### FEATURE TEST #####
+        # clamp_val, feat_grad_norm = .8, feat_grad.norm()
+        # if feat_grad_norm > clamp_val:
+        #     feat_grad = clamp_val * feat_grad / feat_grad_norm
+        #### FEATURE TEST #####
+
+        #### FEATURE TEST #####
+        # Gradient Dropout - Note: Testing.
+        # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
+        # feat_grad = feat_grad * update_mask
+        #### FEATURE TEST #####
+
+        # KL Term computation ### From Compose visual relations ###
+        # Note: TODO: Review this approach
+        if i == num_steps - 1 and not sample and FLAGS.kl:
+            feat_neg_kl = feat_neg
+            rand_idx = torch.randint(2, (1,))
+            energy = models[rand_idx].forward(feat_neg_kl, latent)
+            feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
+            feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
+            feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
+
+        ## Momentum update
+        if FLAGS.momentum > 0:
+            update = FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] + momentum * old_update
+            feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - update # GD computation
+            old_update = update
+        else:
+            feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] # GD computation
+
+
+        if num_fixed_timesteps > 0:
+            feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+                                  feat_neg], dim=2)
+
+        # latents = latents
+        feat_neg = torch.clamp(feat_neg, -1, 1)
+        feat_negs.append(feat_neg)
+        feat_neg = feat_neg.detach()
+        feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+
+    return feat_neg, feat_negs, feat_neg_kl, feat_grad
+
+# gen trajectories with differential sampling ###
+def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     assert FLAGS.num_fixed_timesteps > 0 # In this case, we are encoding velocities and therefore we need at least one GT point.
 
     feat_noise = torch.randn_like(feat_neg).detach()
@@ -405,9 +517,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
         #### FEATURE TEST ##### If commented out, backprop through all. (?)
         feat_neg_out = feat_neg.detach()
         # feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
-
     return feat_neg_out, feat_negs, feat_neg_kl, delta_grad
-
 
 def sync_model(models): # Q: What is this about?
     size = float(dist.get_world_size())
@@ -417,7 +527,10 @@ def sync_model(models): # Q: What is this about?
             dist.broadcast(param.data, 0)
 
 def init_model(FLAGS, device, dataset):
-    model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
@@ -427,10 +540,6 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         dev = torch.device("cuda")
     else:
         dev = torch.device("cpu")
-
-    if FLAGS.independent_energies:
-        edge_ids = torch.eye(FLAGS.components)[None] \
-            .to(dev).requires_grad_(False)
 
     replay_buffer = None
 
@@ -445,9 +554,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
 
-        if FLAGS.forecast:
-            feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
-            # feat_enc = feat[:, :, :10]
+        if FLAGS.forecast is not -1:
+            feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
             feat_enc = normalize_trajectories(feat_enc, augment=False) # We max min normalize the batch
@@ -455,10 +563,10 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
         mask = torch.ones(FLAGS.components).to(dev)
         pairs = get_rel_pairs(rel_send, rel_rec)
-        rw_pair = pairs[0]
-        mask[rw_pair] = 0
-        # rw_pair = pairs[1]
+        rw_pair = pairs[1]
         # mask[rw_pair] = 0
+        # rw_pair = pairs[1]
+        mask[rw_pair] = 0
         # TODO: substitute instead of masking out.
 
         latent = latent * mask[None, :, None]
@@ -467,18 +575,10 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
-        ### NOTE: TEST 1: All but 1 latent
-        mask = torch.ones(FLAGS.components).to(dev)
-
-        # mask[:] = 0
-        latent = latent * mask[None, :, None]
-        # step += 8
-
-        # latent = latent[:]
-        # cyc_perm = (torch.arange(bs) + 1) % bs
-        # latent_old = latent
         b_idx_ref = 14
-        latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
+        # latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
+        # latent[:] = latent[b_idx_ref:b_idx_ref+1]
+
         latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
@@ -491,8 +591,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, sample=True,
-                                                                       create_graph=False) # TODO: why create_graph
+        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test,
+                                                                       sample=True, create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
             b_idx = 9
@@ -500,11 +600,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            limpos = limneg = 1
+            limpos = limneg = 1 if FLAGS.plot_attr == 'loc' else 4
             lims = [-limneg, limpos]
-            lims = None
+
+            # lims = None
             for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step + i_plt)
             # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
@@ -522,10 +623,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
     else:
         dev = torch.device("cpu")
 
-    if FLAGS.independent_energies:
-        edge_ids = torch.eye(FLAGS.components)[None]\
-            .to(dev).requires_grad_(False)
-
     [model.eval() for model in models]
     # [getattr(model, module).train() for model in models for module in ['rnn1', 'rnn2']]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
@@ -534,8 +631,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
 
-        if FLAGS.forecast:
-            feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+        if FLAGS.forecast is not -1:
+            feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
         if FLAGS.normalize_data_latent:
             feat_enc = normalize_trajectories(feat_enc)
@@ -606,10 +703,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
     dev = torch.device("cuda")
 
-    if FLAGS.independent_energies:
-        edge_ids = torch.eye(FLAGS.components)[None] \
-            .to(dev).requires_grad_(False)
-
     start_time = time.perf_counter()
     for epoch in range(FLAGS.num_epoch):
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
@@ -618,8 +711,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
 
-            if FLAGS.forecast:
-                feat_enc = feat[:, :, :FLAGS.num_fixed_timesteps]
+            if FLAGS.forecast is not -1:
+                feat_enc = feat[:, :, :-FLAGS.forecast]
             else: feat_enc = feat
             if FLAGS.normalize_data_latent:
                 feat_enc = normalize_trajectories(feat_enc, augment=True)
@@ -668,7 +761,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 mmd_loss = MMD(latent)
                 loss = loss - mmd_loss
 
-            #### TEST FEATURE ####
             if FLAGS.autoencode or FLAGS.cd_and_ae:
                 loss = loss + feat_loss
 
@@ -676,15 +768,20 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
                 # latent = (latent, mask)
 
-                rand_idx_cd = torch.randint(2, (1,)) # TODO: Check correctness
-                energy_pos = models[rand_idx_cd].forward(feat, latent[0])
-                energy_neg = models[rand_idx_cd].forward(feat_neg.detach(), latent[0])
+                rand_idx_cd = torch.randint(2, (1,))
+
+                ### TEST FEATURE ###
+                # latents_cyc = torch.cat([latent[0][1:], latent[0][:1]], dim=0)
+
+                latent =  (latent[0] * latent[1][:, :, None], latent[1]) # TODO: Mix elements from the batch
+                energy_pos = models[rand_idx_cd].forward(feat, latent)
+                energy_neg = models[rand_idx_cd].forward(feat_neg.detach(), latent)
 
                 ## Contrastive Divergence loss.
                 ml_loss = (energy_pos - energy_neg).mean()
 
                 ## Energy regularization losses
-                loss = loss + ml_loss #energy_pos.mean() - energy_neg.mean()
+                loss = loss + 0.5 * ml_loss #energy_pos.mean() - energy_neg.mean() # TODO: HARDCODED WEIGHTS!
                 loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
             ## Add to the replay buffer
@@ -738,9 +835,12 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # if not grad_norm_ema:
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
-            [torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) for model in models]
+
+            if it > 20000: # Note: Clip gradient to be very small after several iterations
+                [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models]
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
+
             if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
                 model_grad_norm = get_model_grad_norm(models)
                 model_grad_max = get_model_grad_max(models)
@@ -894,7 +994,7 @@ def main_single(rank, FLAGS):
                           # + '_EMA' + str(int(FLAGS.sample_ema))
                           + '_RB' + str(int(FLAGS.replay_batch))
                           + '_AE' + str(int(FLAGS.autoencode))
-                          # + '_FC' + str(int(FLAGS.forecast))
+                          + '_FC' + str(FLAGS.forecast)
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
                           + '_OID' + str(int(FLAGS.obj_id_embedding))
                           # + '_MMD' + str(int(FLAGS.mmd))
@@ -943,7 +1043,6 @@ def main_single(rank, FLAGS):
         FLAGS.forecast = FLAGS_OLD.forecast
         FLAGS.autoencode = FLAGS_OLD.autoencode
         FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
-        FLAGS.independent_energies = FLAGS_OLD.independent_energies
         FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
         FLAGS.num_fixed_timesteps = FLAGS_OLD.num_fixed_timesteps
         # TODO: Check what attributes we are missing
