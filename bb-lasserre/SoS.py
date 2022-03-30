@@ -41,20 +41,28 @@ class SoS_loss(nn.Module):
     def calcQ(self, V, x, Minv=None, kernelized=True):
         #  x: row vectors in veronese space
         # V is s-by-n where n is number of samples s is dimension
-
+        x = x.permute(1, 0)
         if kernelized:
             #  This function calculates Q values usinhg kernelized version if kernelized is true
             if Minv is None:
                 rho = self.rho_val(V) # Note: Added, might not be correct.
                 Minv = V @ \
-                torch.inverse(rho*torch.eye(V.shape[1], device = x.device, requires_grad=False) + torch.t(V) @ V) \
+                torch.inverse(rho*torch.eye(V.shape[1], device=x.device, requires_grad=False) + torch.t(V) @ V) \
                 @ torch.t(V)
             Q = torch.diag(x @ torch.t(x) - x @ Minv @ torch.t(x))
         else:
             if Minv is None:
                 Minv = torch.inverse(((V @ torch.t(V)) / V.shape[1]))
-            Q = x @ Minv @ torch.t(x) # Note: to test
+            Q = torch.diag(x @ Minv @ torch.t(x))
         return Q
+
+    def calcMinv(self, V, kernel=False):
+        if kernel:
+            return V @ \
+                   torch.inverse(self.rho_val(V)*
+                                 torch.eye(V.shape[1], device = V.device, requires_grad=False)
+                                 + torch.t(V) @ V) @ torch.t(V)
+        else: return torch.inverse(((V @ torch.t(V)) / V.shape[1]))
 
     def veronese(self, X, n, powers=None):
         if n==0:
@@ -69,10 +77,9 @@ class SoS_loss(nn.Module):
             if powers.any()==None:
                 raise ValueError("powers cannot be None for mord>=2")
             X = torch.clamp(X, min=1e-10)
-            y = torch.exp( powers
-                          # .to(self.gpu).type(torch.cuda.FloatTensor)
-                           @ torch.log(X)) # Note: Method to accelerate computation. Log doesn't take negative values.
-
+            y = torch.exp(powers
+                          @ torch.log(X)) # Note: Method to accelerate computation. Log doesn't take negative values.
+            # TODO: Check gradients here. log(X) might be a problem near 0.
         return y     
 
     def vmap(self, X):
@@ -89,6 +96,11 @@ class SoS_loss(nn.Module):
             p+=1
         return vx    
 
+        # xs shapes
+        # torch.Size([11, 1001])
+        # torch.Size([66, 1001])
+        # torch.Size([286, 1001])
+        # torch.Size([1001, 1001])
     def rho_val(self, V):
         import math
         return torch.norm( torch.t(V) @ V )/(500*math.sqrt(V.shape[1]))
