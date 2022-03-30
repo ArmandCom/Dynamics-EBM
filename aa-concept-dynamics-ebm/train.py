@@ -260,7 +260,7 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
     momentum = FLAGS.momentum
     old_update = 0.0
 
-    feat_negs = []
+    feat_negs = [feat_neg]
 
     feat_clone = feat.clone() #.requires_grad_(requires_grad=False)
 
@@ -324,8 +324,8 @@ def gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_step
 
         # Smoothing
         # TODO: put back in place
-        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
@@ -453,6 +453,16 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             feat_enc = normalize_trajectories(feat_enc, augment=False) # We max min normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
+        mask = torch.ones(FLAGS.components).to(dev)
+        pairs = get_rel_pairs(rel_send, rel_rec)
+        rw_pair = pairs[0]
+        mask[rw_pair] = 0
+        # rw_pair = pairs[1]
+        # mask[rw_pair] = 0
+        # TODO: substitute instead of masking out.
+
+        latent = latent * mask[None, :, None]
+
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
@@ -468,10 +478,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # cyc_perm = (torch.arange(bs) + 1) % bs
         # latent_old = latent
         b_idx_ref = 14
-        # latent = torch.cat([latent[:, :3], latent[b_idx_ref:b_idx_ref+1, 3:].repeat(bs, 1, 1)], dim=1)
-        # latent = latent[cyc_perm]
-        # print((latent - latent_old).norm())
-        # latent = latent[b_idx_ref:b_idx_ref+1].repeat(bs, 1, 1)
+        latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
         latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
@@ -493,12 +500,14 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
             # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            limpos = 4
-            limneg = 4
-
-            logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=[-limneg, limpos], plot_type =FLAGS.plot_attr)[1], step)
+            limpos = limneg = 1
+            lims = [-limneg, limpos]
+            lims = None
+            for i_plt in range(len(feat_negs)):
+                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+            # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
             print('Plotted.')
         # elif logger is not None:
         #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()

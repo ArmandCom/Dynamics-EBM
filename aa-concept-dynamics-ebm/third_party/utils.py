@@ -616,3 +616,20 @@ def accumulate_traj(states):
     for t in range(loc.shape[2] - 1):
         acc_pos = torch.cat([acc_pos, acc_pos[:, :, t:t+1] + vel[:, :, t:t+1]], dim=2)
     return torch.cat([acc_pos, vel], dim=-1)
+
+def get_rel_pairs(rel_send, rel_rec):
+    # o = torch.arange(3).to(inputs.device)[None, :, None].type(torch.cuda.FloatTensor) ### To test node relations
+    # edges = self.node2edge(o, rel_rec, rel_send)
+    # print(rel_send + rel_rec)
+    ne, nn = rel_send.shape[1:]
+    a = np.arange(ne)
+    rel = (rel_send + rel_rec).detach().cpu().numpy()[0]
+    unique_values = np.unique(rel, axis=0)
+    group_list = []
+    for value in unique_values:
+        this_group = []
+        for i in range(ne):
+            if all(rel[i] == value):
+                this_group.append(a[i])
+        group_list.append(this_group)
+    return group_list
