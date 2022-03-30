@@ -81,6 +81,7 @@ parser.add_argument('--autoencode', action='store_true', help='if set to True we
 # parser.add_argument('--forecast', action='store_true', help='if set to True we use L2 loss instead of Contrastive Divergence')
 parser.add_argument('--forecast', default=-1, type=int, help='forecast N steps in the future (the encoder only sees the previous). -1 invalidates forecasting')
 parser.add_argument('--cd_and_ae', action='store_true', help='if set to True we use L2 loss and Contrastive Divergence')
+parser.add_argument('--cd_mode', default='', type=str, help='chooses between options for energy-based objectives. zeros: zeroes out some of the latents. mix: mixes latents of other samples in the batch.')
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
@@ -770,12 +771,26 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 rand_idx_cd = torch.randint(2, (1,))
 
-                ### TEST FEATURE ###
-                # latents_cyc = torch.cat([latent[0][1:], latent[0][:1]], dim=0)
+                latent, mask = latent
 
-                latent =  (latent[0] * latent[1][:, :, None], latent[1]) # TODO: Mix elements from the batch
+                ### Note: TEST FEATURE ###
+                if FLAGS.cd_mode == 'mix':
+                    latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
+                    latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
+                    latent = (latent, mask)
+                    nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
+                    feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                    FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+
+                elif FLAGS.cd_mode == 'zeros':
+                    latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
+                    feat_neg_cd = feat_neg
+
+                elif FLAGS.cd_mode == '': feat_neg_cd = feat_neg
+                else: raise NotImplementedError
+
                 energy_pos = models[rand_idx_cd].forward(feat, latent)
-                energy_neg = models[rand_idx_cd].forward(feat_neg.detach(), latent)
+                energy_neg = models[rand_idx_cd].forward(feat_neg_cd.detach(), latent)
 
                 ## Contrastive Divergence loss.
                 ml_loss = (energy_pos - energy_neg).mean()
@@ -996,6 +1011,7 @@ def main_single(rank, FLAGS):
                           + '_AE' + str(int(FLAGS.autoencode))
                           + '_FC' + str(FLAGS.forecast)
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
+                          + FLAGS.cd_mode
                           + '_OID' + str(int(FLAGS.obj_id_embedding))
                           # + '_MMD' + str(int(FLAGS.mmd))
                           + '_FE' + str(int(FLAGS.factor_encoder))
