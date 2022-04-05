@@ -8,6 +8,8 @@ from downsample import Downsample
 import warnings
 import math
 from torch.nn.utils import spectral_norm as sn
+from third_party.utils import my_softmax, gumbel_softmax
+from torch.autograd import Variable
 
 warnings.filterwarnings("ignore")
 
@@ -15,11 +17,6 @@ def reparametrize(mu, logvar):
 	std = logvar.div(2).exp()
 	eps = torch.autograd.Variable(std.data.new(std.size()).normal_())
 	return mu + std*eps
-
-def my_softmax(input, axis=1):
-	trans_input = input.transpose(axis, 0).contiguous()
-	soft_max_1d = F.softmax(trans_input)
-	return soft_max_1d.transpose(axis, 0)
 
 class MLP(nn.Module):
 	"""Two-layer fully-connected ELU net with batch norm."""
@@ -93,7 +90,6 @@ class CNN(nn.Module):
 
 		# attention = my_softmax(self.conv_attention(x), axis=2)
 		# edge_prob = (pred * attention).mean(dim=2)
-
 		edge_prob = pred.mean(dim=2)
 		return edge_prob
 
@@ -177,6 +173,8 @@ class CNNLatentEncoder(nn.Module):
 			print("Using CNN encoder.")
 
 		self.init_weights()
+		self.y_zeros = None
+		self.layernorm = nn.LayerNorm(n_out)
 
 	def init_weights(self):
 		for m in self.modules():
@@ -233,5 +231,21 @@ class CNNLatentEncoder(nn.Module):
 			x = self.node2edge(x, rel_rec, rel_send)
 			x = torch.cat((x, x_skip), dim=2)  # Skip connection
 			x = self.mlp3(x)
+		out = self.fc_out(x)
 
-		return self.fc_out(x)
+		### Note: Test feature ###
+		# out = my_softmax(out/10, axis=-1)
+		# hard = True
+		# if hard:
+		# 	shape = out.size()
+		# 	_, k = out.data.max(-1)
+		# 	# this bit is based on
+		# 	# https://discuss.pytorch.org/t/stop-gradients-for-st-gumbel-softmax/530/5
+		# 	if self.y_zeros is None:
+		# 		self.y_zeros = torch.zeros(*shape)
+		# 		if out.is_cuda:
+		# 			self.y_zeros = self.y_zeros.to(out.device)
+		# 	y_hard = self.y_zeros.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
+		# 	out = Variable(y_hard - out.data) + out
+
+		return out #self.layernorm(out)
