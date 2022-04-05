@@ -7,7 +7,7 @@ import numpy as np
 import torch.nn.functional as F
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles
+from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles, TrajectoryDataset
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
@@ -44,6 +44,7 @@ from pathlib import Path
 #  python train.py --exp=charged --num_steps 10 --num_steps_test 200 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --autoencode --data_workers=4 --gpus=1 --normalize_data_latent --num_fixed_timesteps 1 --logname two_resolutions --gpu_rank 0 --factor
 homedir = '/data/Armand/EBM/'
 # port = 6021
+sample_diff = False
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -294,18 +295,19 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
         energy = 0
+        curr_latent = latent
         for ii in range(2):
-            if ii == 1: latent = (latent_ii, 1 - mask)
+            if ii == 1: curr_latent = (latent_ii, 1 - mask)
             if FLAGS.sample_ema:
-                energy = models_ema[ii].forward(feat_neg, latent) + energy
+                energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
             else:
-                energy = models[ii].forward(feat_neg, latent) + energy
+                energy = models[ii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
 
@@ -443,12 +445,13 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
         # Compute energy
         latent_ii, mask = latent
         energy = 0
+        curr_latent = latent
         for ii in range(2):
-            if ii == 1: latent = (latent_ii, 1 - mask)
+            if ii == 1: curr_latent = (latent_ii, 1 - mask)
             if FLAGS.sample_ema:
-                energy = models_ema[ii].forward(feat_neg, latent) + energy
+                energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
             else:
-                energy = models[ii].forward(feat_neg, latent) + energy
+                energy = models[ii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         delta_grad, = torch.autograd.grad([energy.sum()], [delta_neg], create_graph=create_graph)
         # feat_grad_2, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph) # Note: Only to evaluate expression
@@ -555,6 +558,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
 
+
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
@@ -564,22 +568,24 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
         mask = torch.ones(FLAGS.components).to(dev)
         pairs = get_rel_pairs(rel_send, rel_rec)
-        rw_pair = pairs[1]
-        # mask[rw_pair] = 0
-        # rw_pair = pairs[1]
+        rw_pair = pairs[2]
+
+        affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
+
         mask[rw_pair] = 0
+        # rw_pair = pairs[1]
+        # mask[rw_pair] = 0 # try with and without when switching
         # TODO: substitute instead of masking out.
 
-        latent = latent * mask[None, :, None]
+        # latent = latent * mask[None, :, None]
 
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
-        b_idx_ref = 14
-        # latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
+        b_idx_ref = 13
+        latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
         # latent[:] = latent[b_idx_ref:b_idx_ref+1]
-
         latent = (latent, mask)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
@@ -592,11 +598,16 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test,
-                                                                       sample=True, create_graph=False) # TODO: why create_graph
+        if sample_diff:
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+                                                                                create_graph=False) # TODO: why create_graph
+        else:
+            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+                                                                               create_graph=False) # TODO: why create_graph
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
-            b_idx = 9
+            b_idx = 5
+            print('Latent: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
@@ -604,9 +615,9 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             limpos = limneg = 1 if FLAGS.plot_attr == 'loc' else 4
             lims = [-limneg, limpos]
 
-            # lims = None
+            lims = None
             for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + i_plt)
             # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
@@ -651,13 +662,17 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
 
-        if save:
+        if False:
             feat_neg, feat_negs, feat_neg_kl, feat_grad = \
                 gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat,
                               ini_timesteps=10, stride=1, stage_steps=[40, 20, 40])
         else:
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+            if sample_diff:
+                feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                              create_graph=False) # TODO: why create_graph
+            else:
+                feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+                                                                                create_graph=False) # TODO: why create_graph
 
         ## Add to the replay buffer
         if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
@@ -744,7 +759,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
             # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+            if sample_diff:
+                feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+            else:
+                feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
 
             feat_negs = torch.stack(feat_negs, dim=1)
 
@@ -778,9 +796,17 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
                     latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
                     latent = (latent, mask)
-                    nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
-                    feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                    FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+
+                    if sample_diff:
+                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 1
+                        feat_neg_cd, _, _, _ = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+                    else:
+                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
+                        feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+
+                    latent = latent[0]
 
                 elif FLAGS.cd_mode == 'zeros':
                     latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
@@ -878,7 +904,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 kvs = {}
                 kvs['loss'] = avg_loss
-
+                # TODO: print learning rate.
                 if not FLAGS.autoencode or FLAGS.cd_and_ae:
                     energy_pos_mean = energy_pos.mean().item()
                     energy_neg_mean = energy_neg.mean().item()
@@ -891,6 +917,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     kvs['energy_pos_std'] = energy_pos_std
                     kvs['energy_neg_std'] = energy_neg_std
 
+                kvs['LR'] = schedulers[0].get_last_lr()
                 kvs['aaa-L2_loss'] = avg_feat_loss
                 kvs['latent norm'] = latent_norm.item()
 
@@ -1118,6 +1145,7 @@ def main():
     FLAGS.ensembles = 2
     FLAGS.tie_weight = True
     FLAGS.sample = True
+    FLAGS.exp = FLAGS.dataset
 
     logdir = osp.join(FLAGS.logdir, FLAGS.exp)
 
