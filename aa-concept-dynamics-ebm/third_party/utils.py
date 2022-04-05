@@ -13,12 +13,91 @@ import numpy as np
 from PIL import Image
 
 from torch.nn.utils import spectral_norm
+from torch.autograd import Variable
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import math
 
 def swish(x):
     return x * torch.sigmoid(x)
+
+def my_softmax(input, axis=1):
+    trans_input = input.transpose(axis, 0).contiguous()
+    soft_max_1d = F.softmax(trans_input)
+    return soft_max_1d.transpose(axis, 0)
+
+def sample_gumbel(shape, eps=1e-10):
+    """
+    NOTE: Stolen from https://github.com/pytorch/pytorch/pull/3341/commits/327fcfed4c44c62b208f750058d14d4dc1b9a9d3
+
+    Sample from Gumbel(0, 1)
+
+    based on
+    https://github.com/ericjang/gumbel-softmax/blob/3c8584924603869e90ca74ac20a6a03d99a91ef9/Categorical%20VAE.ipynb ,
+    (MIT license)
+    """
+    U = torch.rand(shape).float()
+    return - torch.log(eps - torch.log(U + eps))
+
+
+def gumbel_softmax_sample(logits, tau=1, eps=1e-10):
+    """
+    NOTE: Stolen from https://github.com/pytorch/pytorch/pull/3341/commits/327fcfed4c44c62b208f750058d14d4dc1b9a9d3
+
+    Draw a sample from the Gumbel-Softmax distribution
+
+    based on
+    https://github.com/ericjang/gumbel-softmax/blob/3c8584924603869e90ca74ac20a6a03d99a91ef9/Categorical%20VAE.ipynb
+    (MIT license)
+    """
+    gumbel_noise = sample_gumbel(logits.size(), eps=eps)
+    if logits.is_cuda:
+        gumbel_noise = gumbel_noise.cuda()
+    y = logits + Variable(gumbel_noise)
+    return my_softmax(y / tau, axis=-1)
+
+
+def gumbel_softmax(logits, tau=1, hard=False, eps=1e-10):
+    """
+    NOTE: Stolen from https://github.com/pytorch/pytorch/pull/3341/commits/327fcfed4c44c62b208f750058d14d4dc1b9a9d3
+
+    Sample from the Gumbel-Softmax distribution and optionally discretize.
+    Args:
+      logits: [batch_size, n_class] unnormalized log-probs
+      tau: non-negative scalar temperature
+      hard: if True, take argmax, but differentiate w.r.t. soft sample y
+    Returns:
+      [batch_size, n_class] sample from the Gumbel-Softmax distribution.
+      If hard=True, then the returned sample will be one-hot, otherwise it will
+      be a probability distribution that sums to 1 across classes
+
+    Constraints:
+    - this implementation only works on batch_size x num_features tensor for now
+
+    based on
+    https://github.com/ericjang/gumbel-softmax/blob/3c8584924603869e90ca74ac20a6a03d99a91ef9/Categorical%20VAE.ipynb ,
+    (MIT license)
+    """
+    y_soft = gumbel_softmax_sample(logits, tau=tau, eps=eps)
+    if hard:
+        shape = logits.size()
+        _, k = y_soft.data.max(-1)
+        # this bit is based on
+        # https://discuss.pytorch.org/t/stop-gradients-for-st-gumbel-softmax/530/5
+        y_hard = torch.zeros(*shape)
+        if y_soft.is_cuda:
+            y_hard = y_hard.cuda()
+        y_hard = y_hard.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
+        # this cool bit of code achieves two things:
+        # - makes the output value exactly one-hot (since we add then
+        #   subtract y_soft value)
+        # - makes the gradient equal to y_soft gradient (since we strip
+        #   all other gradients)
+        y = Variable(y_hard - y_soft.data) + y_soft
+    else:
+        y = y_soft
+    return y
+
 
 class ReplayBuffer(object):
     def __init__(self, size, transform, FLAGS):
@@ -532,14 +611,12 @@ def MMD(latent):
     return batch_MMD(latent[randperm], latent)
 
 def augment_trajectories(locvel, rotation=None):
-    loc, vel = locvel
     if rotation is not None:
         if rotation == 'random':
             rotation = random.random() * math.pi * 2
         else: raise NotImplementedError
-        loc = rotate(origin=(0,0), points=loc, angle=rotation)
-        vel = rotate(origin=(0,0), points=vel, angle=rotation)
-    return loc, vel
+        locvel = rotate_with_vel(points=locvel, angle=rotation)
+    return locvel
 
 def rotate(origin, points, angle):
     """
@@ -548,22 +625,39 @@ def rotate(origin, points, angle):
     The angle should be given in radians.
     """
     ox, oy = origin
-    px, py = points[..., 0:1], points[..., 1:]
+    px, py = points[..., 0:1], points[..., 1:2]
 
     qx = ox + math.cos(angle) * (px - ox) - math.sin(angle) * (py - oy)
     qy = oy + math.sin(angle) * (px - ox) + math.cos(angle) * (py - oy)
+
     return torch.cat([qx, qy], dim=-1)
+
+def rotate_with_vel(points, angle):
+    """
+    Rotate a point counterclockwise by a given angle around a given origin.
+
+    The angle should be given in radians.
+    """
+
+    locs = torch.view_as_complex(points[..., :2])
+    locpol = torch.polar(locs.abs(), locs.angle() + angle)
+    locs = torch.view_as_real(locpol)
+
+    vels = torch.view_as_complex(points[..., 2:])
+    velpol = torch.polar(vels.abs(), vels.angle() + angle)
+    vels = torch.view_as_real(velpol)
+
+    return torch.cat([locs, vels], dim=-1)
 
 def normalize_trajectories(state, augment=False):
     '''
     state: [BS, NO, T, XY VxVy]
     '''
 
-    loc, vel = state[..., :2], state[..., 2:]
-
     if augment:
-        loc, vel = augment_trajectories((loc, vel), 'random')
+        state = augment_trajectories(state, 'random')
 
+    loc, vel = state[..., :2], state[..., 2:]
     ## Instance normalization
     loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
     loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
@@ -577,25 +671,30 @@ def normalize_trajectories(state, augment=False):
     # vel_min = vel.min() #(dim=-2, keepdims=True)[0]
 
     # Normalize to [-1, 1]
-    # print(loc.shape, loc_min.shape)
     loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-    vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+    vel = vel * 2 / (loc_max - loc_min)
 
     state = torch.cat([loc, vel], dim=-1)
     return state
 
-def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc'):
+def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None):
     fig = plt.figure()
     axes = plt.gca()
+    lw = 2.5
     if lims is not None:
         axes.set_xlim([lims[0], lims[1]])
         axes.set_ylim([lims[0], lims[1]])
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
     vel_norm = np.sqrt((vel ** 2).sum(axis=1))
+
+    if highlight_nodes is not None:
+        modes = ['-' if node == 0 else '--' for node in highlight_nodes]
+        assert len(modes) == loc.shape[-1]
+    else: modes = ['-']*loc.shape[-1]
     if plot_type == 'loc' or plot_type == 'both':
         for i in range(loc.shape[-1]):
-            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i])
+            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i], modes[i], linewidth=lw)
             plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
         pass
     if plot_type == 'vel' or plot_type == 'both':
@@ -605,7 +704,7 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc'):
             for t in range(loc.shape[1] - 1):
                 acc_pos = np.concatenate([acc_pos[0], acc_pos[0][t:t+1]+vels[0][t:t+1]]), \
                           np.concatenate([acc_pos[1], acc_pos[1][t:t+1]+vels[1][t:t+1]])
-            plt.plot(acc_pos[0], acc_pos[1])
+            plt.plot(acc_pos[0], acc_pos[1], modes[i], linewidth=lw)
             plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
 
     return plt, fig
@@ -633,3 +732,4 @@ def get_rel_pairs(rel_send, rel_rec):
                 this_group.append(a[i])
         group_list.append(this_group)
     return group_list
+
