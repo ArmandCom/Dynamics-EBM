@@ -399,7 +399,7 @@ def gen_trajectories_diff (latent, FLAGS, models, feat_neg, feat, num_steps, sam
 
 
     #### FEATURE TEST #### TODO: Not fine yet
-    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.001 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
+    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.0001 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
     delta_neg.requires_grad_(requires_grad=True)
 
     feat_var_ini = feat_var[:, :, 0:1]
@@ -518,17 +518,18 @@ def sync_model(models): # Q: What is this about?
 
 def init_model(FLAGS, device, dataset):
     # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
     # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
 def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = None):
-    b_idx_1 = 10
-    b_idx_2 = 14
+    b_idx_1 = 9
+    b_idx_2 = 12
 
+    print(FLAGS)
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
@@ -545,8 +546,7 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
     rel_send = rel_send[:1].to(dev)
     bs = feat_1.size(0)
 
-    ### MASKS AND SELECTED PAIRS ###
-    mask = torch.ones(FLAGS.components).to(dev)
+    ### SELECTED PAIRS ###
     pairs = get_rel_pairs(rel_send, rel_rec)
     rw_pair = pairs[2]
     affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
@@ -561,11 +561,16 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
             feat_enc = feats[mod_idx][:, :, :-FLAGS.forecast]
         else: feat_enc = feats[mod_idx]
         if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc, augment=True) # We max min normalize the batch
+            feat_enc = normalize_trajectories(feat_enc, augment=False) # We max min normalize the batch
         latents.append(model.embed_latent(feat_enc, rel_rec, rel_send))
 
-    mask = mask * 0
-    mask[rw_pair] = 1
+    mask = torch.ones(FLAGS.components).to(dev)
+    mask[rw_pair] = 0
+
+    # mask = mask * 0
+    # mask[rw_pair] = 1
+
+    # mask[3:] = 1
 
     latent_mix = latents[0] * mask[None, :, None] + latents[1] * (1-mask)[None, :, None]
     latent = (latent_mix, mask)
@@ -602,9 +607,8 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
         for i_plt in range(len(feat_negs)):
             logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], i_plt)
         # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
-        logger.add_figure('test_manip_gt_1', get_trajectory_figure(feat_enc, b_idx=0, lims=lims, plot_type ='loc')[1], 0)
-        logger.add_figure('test_manip_gt_2', get_trajectory_figure(feat_enc, b_idx=0, lims=lims, plot_type ='vel')[1], 0)
-        logger.add_figure('test_manip_gt_1', get_trajectory_figure(feats[1], b_idx=0, lims=lims, plot_type ='loc')[1], 1)
+        logger.add_figure('test_manip_gt_1', get_trajectory_figure(feats[0], b_idx=0, lims=lims, plot_type =FLAGS.plot_attr)[1], 0)
+        logger.add_figure('test_manip_gt_2', get_trajectory_figure(feats[1], b_idx=0, lims=lims, plot_type =FLAGS.plot_attr)[1], 0)
         print('Plotted.')
 
         # elif logger is not None:
