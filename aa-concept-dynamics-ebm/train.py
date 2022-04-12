@@ -785,29 +785,29 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 rand_idx_cd = torch.randint(len(models), (1,))
 
                 latent, mask = latent
+                #
+                # ### Note: TEST FEATURE ###
+                # if FLAGS.cd_mode == 'mix':
+                #     latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
+                #     latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
+                #     latent = (latent, mask)
+                #
+                #     if sample_diff:
+                #         nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 1
+                #         feat_neg_cd, _, _, _ = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                #         FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+                #     else:
+                #         nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
+                #         feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                #         FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+                #
+                #     latent = latent[0]
+                #
+                # elif FLAGS.cd_mode == 'zeros':
+                #     latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
+                #     feat_neg_cd = feat_neg
 
-                ### Note: TEST FEATURE ###
-                if FLAGS.cd_mode == 'mix':
-                    latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
-                    latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
-                    latent = (latent, mask)
-
-                    if sample_diff:
-                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 1
-                        feat_neg_cd, _, _, _ = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
-                    else:
-                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
-                        feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
-
-                    latent = latent[0]
-
-                elif FLAGS.cd_mode == 'zeros':
-                    latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
-                    feat_neg_cd = feat_neg
-
-                elif FLAGS.cd_mode == '': feat_neg_cd = feat_neg
+                if FLAGS.cd_mode == '': feat_neg_cd = feat_neg
                 else: raise NotImplementedError
 
                 energy_pos = models[rand_idx_cd].forward(feat, latent)
