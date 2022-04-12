@@ -295,14 +295,14 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
         energy = 0
         curr_latent = latent
-        for ii in range(2):
+        for ii in range(len(models)):
             if ii == 1: curr_latent = (latent_ii, 1 - mask)
             if FLAGS.sample_ema:
                 energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
@@ -327,7 +327,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         # Note: TODO: Review this approach
         if i == num_steps - 1 and not sample and FLAGS.kl:
             feat_neg_kl = feat_neg
-            rand_idx = torch.randint(2, (1,))
+            rand_idx = torch.randint(len(models), (1,))
             energy = models[rand_idx].forward(feat_neg_kl, latent)
             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
@@ -446,7 +446,7 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
         latent_ii, mask = latent
         energy = 0
         curr_latent = latent
-        for ii in range(2):
+        for ii in range(len(models)):
             if ii == 1: curr_latent = (latent_ii, 1 - mask)
             if FLAGS.sample_ema:
                 energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
@@ -474,7 +474,7 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
         # Note: TODO: Review this approach
         if i == num_steps - 1 and not sample and FLAGS.kl:
             feat_neg_kl = feat_neg
-            rand_idx = torch.randint(2, (1,))
+            rand_idx = torch.randint(len(models), (1,))
             energy = models[rand_idx].forward(feat_neg_kl, latent)
 
             delta_grad_kl, = torch.autograd.grad([energy.sum()], [delta_neg], create_graph=create_graph)  # Create_graph true?
@@ -654,7 +654,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
-        mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+        mask = torch.randint(len(models), (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
 
         if False:
@@ -751,8 +751,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
-            mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
-            # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
+            # mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
+            mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
             if sample_diff:
                 feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
@@ -782,7 +782,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
                 # latent = (latent, mask)
 
-                rand_idx_cd = torch.randint(2, (1,))
+                rand_idx_cd = torch.randint(len(models), (1,))
 
                 latent, mask = latent
 
@@ -1139,7 +1139,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 2
+    FLAGS.ensembles = 1
     FLAGS.tie_weight = True
     FLAGS.sample = True
     FLAGS.exp = FLAGS.dataset

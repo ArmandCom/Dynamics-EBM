@@ -288,8 +288,8 @@ def  gen_trajectories(latent, FLAGS, models, feat_neg, feat, num_steps, sample=F
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent

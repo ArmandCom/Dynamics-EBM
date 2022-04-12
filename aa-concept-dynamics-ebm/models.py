@@ -539,14 +539,15 @@ class EdgeGraphEBM_OneStep(nn.Module):
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
 
-        edges_pre = swish(self.cnn_pre_bf(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
+        # edges_pre = swish(self.cnn_pre_bf(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers # Note: removed
 
         # Convolutional Conditioning
         edges = swish(self.cnn_bf(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
         edges = self.layer1_cnn_bf(edges, latent)
         edges = self.layer2_cnn_bf(edges, latent)
 
-        edges_cat = torch.cat([edges[..., :-1], edges_pre[..., 1:]], dim=-2)
+        # edges_cat = torch.cat([edges[..., :-1], edges_pre[..., 1:]], dim=-2) # Note: removed
+        edges_cat = edges
 
         # TODO: Implement multi-resolution.
         edges_unfold = edges_cat.unfold(-1, self.num_time_instances, self.stride)
@@ -662,6 +663,7 @@ class EdgeGraphEBM_CNN_OS_noF(nn.Module):
 
         self.rel_rec = None
         self.rel_send = None
+        self.ones_mask = None
 
     def embed_latent(self, traj, rel_rec, rel_send):
         if self.rel_rec is None and self.rel_send is None:
@@ -726,7 +728,10 @@ class EdgeGraphEBM_CNN_OS_noF(nn.Module):
             latent, mask = latent
             if len(mask.shape) < 2:
                 mask = mask[None]
-        else: mask = torch.ones((1, 1)).to(inputs.device)
+        else:
+            if self.ones_mask is None:
+                self.ones_mask = torch.ones((1, 1)).to(inputs.device)
+            mask = self.ones_mask
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
