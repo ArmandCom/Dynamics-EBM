@@ -409,7 +409,7 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
 
 
     #### FEATURE TEST #### TODO: Not fine yet
-    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.001 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
+    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.01 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
     delta_neg.requires_grad_(requires_grad=True)
 
     feat_var_ini = feat_var[:, :, 0:1]
@@ -532,9 +532,9 @@ def sync_model(models): # Q: What is this about?
 
 def init_model(FLAGS, device, dataset):
     # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
+    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
@@ -562,29 +562,22 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc, augment=False) # We max min normalize the batch
+        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
-        mask = torch.ones(FLAGS.components).to(dev)
         pairs = get_rel_pairs(rel_send, rel_rec)
-        rw_pair = pairs[2]
-
+        rw_pair = pairs[1]
         affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
-
-        mask[rw_pair] = 0
-        # rw_pair = pairs[1]
-        # mask[rw_pair] = 0 # try with and without when switching
-        # TODO: substitute instead of masking out.
-
-        # latent = latent * mask[None, :, None]
 
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
-        b_idx_ref = 13
-        latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
+        b_idx_ref = 10
+        mask = torch.ones(FLAGS.components).to(dev)
+        # mask[rw_pair] = 0
+        # latent = latent * mask[None, :, None]
+        # latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
         # latent[:] = latent[b_idx_ref:b_idx_ref+1]
         latent = (latent, mask)
 
@@ -604,6 +597,9 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         else:
             feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                create_graph=False) # TODO: why create_graph
+            # feat_neg, feat_negs, feat_neg_kl, feat_grad = \
+            #     gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat,
+            #                   ini_timesteps=7, stride=1, stage_steps=[40, 20, 40])
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
             b_idx = 5
@@ -646,8 +642,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc)
+        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
 
         feat_neg = torch.rand_like(feat) * 2 - 1
@@ -706,7 +701,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
     grad_norm_ema = None
-    schedulers = [StepLR(optimizer, step_size=30000, gamma=0.5) for optimizer in optimizers]
+    schedulers = [StepLR(optimizer, step_size=40000, gamma=0.5) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
@@ -823,7 +818,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 ## Energy regularization losses
                 loss = loss + 0.5 * ml_loss #energy_pos.mean() - energy_neg.mean() # TODO: HARDCODED WEIGHTS!
-                loss = loss + (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+                loss = loss + 0.5 * (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
 
             ## Add to the replay buffer
             if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
@@ -877,7 +872,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
 
-            if it > 20000: # Note: Clip gradient to be very small after several iterations
+            if it > 4000: # Note: Clip gradient to be very small after several iterations
                 [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models]
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
@@ -917,7 +912,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     kvs['energy_pos_std'] = energy_pos_std
                     kvs['energy_neg_std'] = energy_neg_std
 
-                kvs['LR'] = schedulers[0].get_last_lr()
+                kvs['LR'] = schedulers[0].get_last_lr()[0]
                 kvs['aaa-L2_loss'] = avg_feat_loss
                 kvs['latent norm'] = latent_norm.item()
 
@@ -981,7 +976,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger, replay_buffer=replay_buffer_test)
                 print('Test at step %d done!' % it)
-                print('Experiment: ' + logger.log_dir.split('/')[-1])
+                exp_name = logger.log_dir.split('/')
+                print('Experiment: ' + exp_name[-2] + '/' + exp_name[-1])
 
             it += 1
 
@@ -1019,10 +1015,11 @@ def main_single(rank, FLAGS):
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
 
+    branch_folder = 'joint-split-onestep'
     if FLAGS.logname == 'debug':
         logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
     else:
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, 'joint-split-onestep',
+        logdir = osp.join(FLAGS.logdir, FLAGS.exp, branch_folder,
                             'NO' +str(FLAGS.n_objects)
                           + '_BS' + str(FLAGS.batch_size)
                           + '_S-LR' + str(FLAGS.step_lr)
@@ -1052,7 +1049,7 @@ def main_single(rank, FLAGS):
 
     if FLAGS.resume_iter != 0:
         if FLAGS.resume_name is not '':
-            logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.resume_name)
+            logdir = osp.join(FLAGS.logdir, FLAGS.exp, branch_folder, FLAGS.resume_name)
 
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))

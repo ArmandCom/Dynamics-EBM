@@ -649,7 +649,7 @@ def rotate_with_vel(points, angle):
 
     return torch.cat([locs, vels], dim=-1)
 
-def normalize_trajectories(state, augment=False):
+def normalize_trajectories(state, augment=False, normalize=True):
     '''
     state: [BS, NO, T, XY VxVy]
     '''
@@ -657,24 +657,25 @@ def normalize_trajectories(state, augment=False):
     if augment:
         state = augment_trajectories(state, 'random')
 
-    loc, vel = state[..., :2], state[..., 2:]
-    ## Instance normalization
-    loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
-    loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
-    vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
-    vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
+    if normalize:
+        loc, vel = state[..., :2], state[..., 2:]
+        ## Instance normalization
+        loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
+        loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
+        vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
+        vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
 
-    ## Batch normalization
-    # loc_max = loc.max()
-    # loc_min = loc.min()
-    # vel_max = vel.max()
-    # vel_min = vel.min() #(dim=-2, keepdims=True)[0]
+        ## Batch normalization
+        # loc_max = loc.max()
+        # loc_min = loc.min()
+        # vel_max = vel.max()
+        # vel_min = vel.min() #(dim=-2, keepdims=True)[0]
 
-    # Normalize to [-1, 1]
-    loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-    vel = vel * 2 / (loc_max - loc_min)
+        # Normalize to [-1, 1]
+        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        vel = vel * 2 / (loc_max - loc_min)
 
-    state = torch.cat([loc, vel], dim=-1)
+        state = torch.cat([loc, vel], dim=-1)
     return state
 
 def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None):
