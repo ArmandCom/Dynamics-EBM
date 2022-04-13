@@ -323,6 +323,8 @@ class EdgeGraphEBM_CNNOneStep(nn.Module):
                 self.ones_mask = torch.ones((1, 1)).to(inputs.device)
             mask = self.ones_mask
 
+        latent = latent * mask[..., None]
+
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
         edges_cnn = swish(self.cnn(edges))  # [R, 8, T] --> [R, F, T'] # CNN layers
@@ -337,7 +339,7 @@ class EdgeGraphEBM_CNNOneStep(nn.Module):
         x = x.reshape(BS, NR, x.size(-1))
 
         # Mask before message passing
-        x = x * mask[:, :, None]
+        # x = x * mask[:, :, None]
 
         # Skip connection
         x_skip = x
@@ -366,7 +368,7 @@ class EdgeGraphEBM_CNNOneStep(nn.Module):
         x = self.layer1_trans(x, latent)
         x = self.layer2_trans(x, latent)
         # x = swish(self.mlp2_trans(x))
-        x = x * mask[:, None, :, None]
+        # x = x * mask[:, None, :, None]
 
         # Join all edges with the edge of interest
         x = x.reshape(BS*NC, NR, x.size(-1))

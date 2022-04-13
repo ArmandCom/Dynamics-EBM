@@ -532,9 +532,9 @@ def sync_model(models): # Q: What is this about?
 
 def init_model(FLAGS, device, dataset):
     # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
     # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
-    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
@@ -701,7 +701,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
     grad_norm_ema = None
-    schedulers = [StepLR(optimizer, step_size=40000, gamma=0.5) for optimizer in optimizers]
+    schedulers = [StepLR(optimizer, step_size=50000, gamma=0.5) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
     if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
@@ -751,8 +751,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
-            # mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
-            mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
+            mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
+            # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
             if sample_diff:
                 feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
@@ -787,27 +787,27 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 latent, mask = latent
                 #
                 # ### Note: TEST FEATURE ###
-                # if FLAGS.cd_mode == 'mix':
-                #     latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
-                #     latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
-                #     latent = (latent, mask)
-                #
-                #     if sample_diff:
-                #         nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 1
-                #         feat_neg_cd, _, _, _ = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                #         FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
-                #     else:
-                #         nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
-                #         feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                #         FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
-                #
-                #     latent = latent[0]
-                #
-                # elif FLAGS.cd_mode == 'zeros':
-                #     latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
-                #     feat_neg_cd = feat_neg
+                if FLAGS.cd_mode == 'mix':
+                    latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
+                    latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
+                    latent = (latent, mask)
 
-                if FLAGS.cd_mode == '': feat_neg_cd = feat_neg
+                    if sample_diff:
+                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 1
+                        feat_neg_cd, _, _, _ = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+                    else:
+                        nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
+                        feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
+                        FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+
+                    latent = latent[0]
+
+                elif FLAGS.cd_mode == 'zeros':
+                    latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
+                    feat_neg_cd = feat_neg
+
+                elif FLAGS.cd_mode == '': feat_neg_cd = feat_neg
                 else: raise NotImplementedError
 
                 energy_pos = models[rand_idx_cd].forward(feat, latent)
@@ -872,7 +872,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
 
-            if it > 4000: # Note: Clip gradient to be very small after several iterations
+            if it > 8000: # Note: Clip gradient to be very small after several iterations
                 [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models]
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
@@ -1075,6 +1075,7 @@ def main_single(rank, FLAGS):
         FLAGS.num_additional = FLAGS_OLD.num_additional
         FLAGS.decoder = FLAGS_OLD.decoder
         FLAGS.test_manipulate = FLAGS_OLD.test_manipulate
+        FLAGS.lr = FLAGS_OLD.lr
         # FLAGS.sim = FLAGS_OLD.sim
         FLAGS.exp = FLAGS_OLD.exp
         FLAGS.step_lr = FLAGS_OLD.step_lr
@@ -1094,13 +1095,13 @@ def main_single(rank, FLAGS):
             models_ema, _  = init_model(FLAGS, device, dataset)
             for i, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
                 model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
+                # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
                 model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(i)], strict=False)
         else:
             models_ema = None
             for i, (model, optimizer) in enumerate(zip(models, optimizers)):
                 model.load_state_dict(checkpoint['model_state_dict_{}'.format(i)], strict=False)
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
+                # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(i)])
     else:
         models, optimizers = init_model(FLAGS, device, dataset)
         if FLAGS.sample_ema:
@@ -1139,7 +1140,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 1
+    FLAGS.ensembles = 2
     FLAGS.tie_weight = True
     FLAGS.sample = True
     FLAGS.exp = FLAGS.dataset

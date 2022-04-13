@@ -79,7 +79,7 @@ parser.add_argument('--cd_mode', default='', type=str, help='chooses between opt
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
-parser.add_argument('--ensembles', default=1, type=int, help='use an ensemble of models')
+parser.add_argument('--ensembles', default=2, type=int, help='use an ensemble of models')
 
 # EBM specific settings
 
@@ -288,8 +288,8 @@ def  gen_trajectories(latent, FLAGS, models, feat_neg, feat, num_steps, sample=F
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
@@ -560,14 +560,13 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
         if FLAGS.forecast is not -1:
             feat_enc = feats[mod_idx][:, :, :-FLAGS.forecast]
         else: feat_enc = feats[mod_idx]
-        if FLAGS.normalize_data_latent:
-            feat_enc = normalize_trajectories(feat_enc, augment=False) # We max min normalize the batch
+        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latents.append(model.embed_latent(feat_enc, rel_rec, rel_send))
 
     mask = torch.ones(FLAGS.components).to(dev)
     mask[rw_pair] = 0
 
-    # mask = mask * 0
+    mask = mask * 0
     # mask[rw_pair] = 1
 
     # mask[3:] = 1
@@ -686,6 +685,7 @@ def main_single(rank, FLAGS):
                 FLAGS.num_additional = FLAGS_OLD.num_additional
                 FLAGS.decoder = FLAGS_OLD.decoder
                 FLAGS.test_manipulate = FLAGS_OLD.test_manipulate
+                FLAGS.ensembles = FLAGS_OLD.ensembles
                 # FLAGS.sim = FLAGS_OLD.sim
                 FLAGS.exp = FLAGS_OLD.exp
                 FLAGS.step_lr = FLAGS_OLD.step_lr
@@ -701,7 +701,7 @@ def main_single(rank, FLAGS):
 
             # Note: We load the first learned model for each of the datasets
 
-            models[ckpt_idx].load_state_dict(checkpoint['model_state_dict_{}'.format(ckpt_idx)], strict=False)
+            models[ckpt_idx].load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
         else: print('Must provide checkpoint resume iteration.'); exit()
 
     if FLAGS.gpus > 1:
@@ -720,7 +720,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 2
+    # FLAGS.ensembles = 1
     FLAGS.tie_weight = True
     FLAGS.sample = True
     FLAGS.exp = FLAGS.dataset

@@ -234,7 +234,7 @@ class CNNLatentEncoder(nn.Module):
 		out = self.fc_out(x)
 
 		### Note: Test feature ###
-		# out = my_softmax(out, axis=-1)
+		out = my_softmax(out/.1, axis=-1)
 		# hard = True
 		# if hard:
 		# 	shape = out.size()
@@ -248,5 +248,6 @@ class CNNLatentEncoder(nn.Module):
 		# 	y_hard = self.y_zeros.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
 		# 	out = Variable(y_hard - out.data) + out
 
-		out = self.layernorm(out)
+		# out = self.layernorm(out)
+		# out = F.sigmoid(out/.1)
 		return out
