@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 # from easydict import EasyDict
 import os.path as osp
+import math
 # from torch.nn.utils import clip_grad_norm
 # import numpy as np
 # from imageio import imwrite
@@ -98,7 +99,7 @@ parser.add_argument('--tie_weight', action='store_true', help='tie the weights b
 parser.add_argument('--optimize_mask', action='store_true', help='also optimize a segmentation mask over image')
 parser.add_argument('--pos_embed', action='store_true', help='add a positional embedding to model')
 parser.add_argument('--spatial_feat', action='store_true', help='use spatial latents for object segmentation')
-parser.add_argument('--dropout', default=0.1, type=float, help='use spatial latents for object segmentation')
+parser.add_argument('--dropout', default=0.0, type=float, help='use spatial latents for object segmentation')
 parser.add_argument('--factor_encoder', action='store_true', help='if we use message passing in the encoder')
 parser.add_argument('--normalize_data_latent', action='store_true', help='if we normalize data before encoding the latents')
 parser.add_argument('--obj_id_embedding', action='store_true', help='add object identifier')
@@ -315,8 +316,8 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
-        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
@@ -459,8 +460,8 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
 
         # Smoothing
         # TODO: put back in place
-        if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
-            feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+        # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+        #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
         latent_ii, mask = latent
@@ -552,9 +553,9 @@ def sync_model(models): # Q: What is this about?
 
 def init_model(FLAGS, device, dataset):
     # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
     # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
-    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
@@ -584,6 +585,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         else: feat_enc = feat
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
+        if isinstance(latent, tuple):
+            latent, weights = latent
 
         pairs = get_rel_pairs(rel_send, rel_rec)
         rw_pair = pairs[1]
@@ -664,6 +667,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         else: feat_enc = feat
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
+        if isinstance(latent, tuple):
+            latent, weights = latent
 
         feat_neg = torch.rand_like(feat) * 2 - 1
         if replay_buffer is not None:
@@ -674,6 +679,10 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
+
+        # Option 1: Test New feature --> EBM selector
+        # latent = (None, latent[..., 0])
+        # Option 2
         mask = torch.randint(len(models), (FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
 
@@ -708,6 +717,9 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             if replay_buffer is not None:
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
                 torch.save(replay_buffer, replay_buffer_path)
+            # print('Masks: {}'.format( latent[1][0].detach().cpu().numpy()))
+            print('Latents: {}'.format( latent[0][0,...,0].detach().cpu().numpy()))
+
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
@@ -738,6 +750,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     for epoch in range(FLAGS.num_epoch):
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
+            loss = 0.0
             feat = feat.to(dev)
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
@@ -749,6 +762,14 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 feat_enc = normalize_trajectories(feat_enc, augment=True)
             rand_idx = torch.randint(2, (1,))
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
+
+            # Note: Test feature
+            if isinstance(latent, tuple):
+                latent, weights = latent
+                l2_w_loss = torch.pow(weights, 2).mean()
+                prod_w_loss = torch.prod(weights, 1).mean()
+                loss = loss - 0.001 * l2_w_loss + 0.001 * prod_w_loss
+            else: l2_w_loss = 0
 
             # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
             feat = feat[:, :, :10]
@@ -771,9 +792,14 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 if FLAGS.num_fixed_timesteps > 0:
                     feat_neg = align_replayed_batch(feat, feat_neg)
 
+
+            # Option 1
+            # latent = (None, latent[..., 0]) # Note: Test feature
+            # Option 2
             mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
             # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
+
             if sample_diff:
                 feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
             else:
@@ -941,6 +967,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 if FLAGS.kl:
                     kvs['kl_loss'] = loss_kl.mean().item()
+
+                kvs['weight_l2_loss'] = l2_w_loss
 
                 if FLAGS.mmd:
                     kvs['mmd_loss'] = mmd_loss.mean().item()
