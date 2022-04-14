@@ -146,6 +146,26 @@ parser.add_argument('--gpus', default=1, type=int, help='number of gpus per node
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
 parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
 
+def kl_categorical(preds, log_prior, num_atoms, eps=1e-16):
+    """Based on https://github.com/ethanfetaya/NRI (MIT License)."""
+    # kl_div = preds * (torch.log(preds + eps) - log_prior[0][0][0]) + (1-preds) * (torch.log(1-preds + eps) - log_prior[0][0][1] )
+    kl_div = preds * (torch.log(preds + eps) - log_prior) #log_prior.permute(0,2,1))
+    return kl_div.sum() / (num_atoms * preds.size(0))
+
+def kl_categorical_uniform(
+        preds, num_atoms, num_edge_types, add_const=False, eps=1e-16
+):
+    """Based on https://github.com/ethanfetaya/NRI (MIT License)."""
+    kl_div = preds * (torch.log(preds + eps))
+    if add_const:
+        const = np.log(num_edge_types)
+        kl_div += const
+    return kl_div.sum() / (num_atoms * preds.size(0))
+
+# log_prior = torch.FloatTensor(np.log(prior))
+# log_prior = log_prior.unsqueeze(0).unsqueeze(0)
+# if args.cuda:
+#     log_prior = log_prior.cuda()
 
 def gaussian_fn(M, std):
     n = torch.arange(0, M) - (M - 1.0) / 2.0
@@ -768,7 +788,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
 
             ## Compute losses
-            loss = 0
+
+            #### TEST FEATURE ####
+            # kl_edge_loss = 0 #kl_categorical_uniform(latent[1], FLAGS.n_objects, num_edge_types=2, add_const=False, eps=1e-16) # kl_categorical(latent[1], math.log(0.5), FLAGS.components, eps=1e-16) # n_objects
+            # loss = loss + 10 * kl_edge_loss
 
             #### TEST FEATURE #### maximize MMD
             if FLAGS.mmd:
