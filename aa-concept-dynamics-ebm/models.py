@@ -8,7 +8,7 @@ from downsample import Downsample
 import numpy as np
 import warnings
 from torch.nn.utils import spectral_norm as sn
-from encoder_models import MLPLatentEncoder, CNNLatentEncoder, my_softmax
+from encoder_models import MLPLatentEncoder, CNNLatentEncoder, CNNEmbeddingLatentEncoder, my_softmax
 from itertools import groupby
 
 warnings.filterwarnings("ignore")
@@ -249,8 +249,10 @@ class EdgeGraphEBM_CNNOneStep(nn.Module):
         else: timesteps_enc = args.timesteps
         # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
         #                                        do_prob=args.dropout, factor=True)
-        self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
-                                               do_prob=args.dropout, factor=True)
+        # self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
+        #                                        do_prob=args.dropout, factor=True)
+        self.latent_encoder = CNNEmbeddingLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
+                                                        do_prob=args.dropout, factor=True)
 
         self.rel_rec = None
         self.rel_send = None
@@ -323,7 +325,8 @@ class EdgeGraphEBM_CNNOneStep(nn.Module):
                 self.ones_mask = torch.ones((1, 1)).to(inputs.device)
             mask = self.ones_mask
 
-        latent = latent * mask[..., None]
+        if latent is not None:
+            latent = latent * mask[..., None]
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send) #[N, 4, T] --> [R, 8, T] # Marshalling
@@ -660,9 +663,10 @@ class EdgeGraphEBM_CNN_OS_noF(nn.Module):
         else: timesteps_enc = args.timesteps
         # self.latent_encoder = MLPLatentEncoder(timesteps_enc * args.input_dim, args.latent_hidden_dim, args.latent_dim,
         #                                        do_prob=args.dropout, factor=True)
-        self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
+        # self.latent_encoder = CNNLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
+        #                                        do_prob=args.dropout, factor=True)
+        self.latent_encoder = CNNEmbeddingLatentEncoder(state_dim, args.latent_hidden_dim, args.latent_dim,
                                                do_prob=args.dropout, factor=True)
-
         self.rel_rec = None
         self.rel_send = None
         self.ones_mask = None
@@ -1161,32 +1165,39 @@ class CondMLPResBlock1d(nn.Module):
         # TODO: How to properly condition the different objects. Equally? or should we concatenate them.
         x_orig = x
 
-        latent_1 = self.latent_fc1(latent)
-        latent_2 = self.latent_fc2(latent)
+        if latent is not None:
+            latent_1 = self.latent_fc1(latent)
+            latent_2 = self.latent_fc2(latent)
 
-        gain = latent_1[:, :, :self.filters]
-        bias = latent_1[:, :, self.filters:]
+            gain = latent_1[:, :, :self.filters]
+            bias = latent_1[:, :, self.filters:]
 
-        gain2 = latent_2[:, :, :self.filters]
-        bias2 = latent_2[:, :, self.filters:]
+            gain2 = latent_2[:, :, :self.filters]
+            bias2 = latent_2[:, :, self.filters:]
 
-        if len(x.shape) > 3:
-            x = self.fc1(x)
-            x = gain[:, None] * x + bias[:, None]
-            x = swish(x)
+            if len(x.shape) > 3:
+                x = self.fc1(x)
+                x = gain[:, None] * x + bias[:, None]
+                x = swish(x)
 
 
-            x = self.fc2(x)
-            x = gain2[:, None] * x + bias2[:, None]
-            x = swish(x)
+                x = self.fc2(x)
+                x = gain2[:, None] * x + bias2[:, None]
+                x = swish(x)
+            else:
+                x = self.fc1(x)
+                x = gain * x + bias
+                x = swish(x)
+
+
+                x = self.fc2(x)
+                x = gain2 * x + bias2
+                x = swish(x)
         else:
             x = self.fc1(x)
-            x = gain * x + bias
             x = swish(x)
 
-
             x = self.fc2(x)
-            x = gain2 * x + bias2
             x = swish(x)
 
         x_out = x_orig + x
