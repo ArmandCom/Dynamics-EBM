@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles, TrajectoryDataset
+from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
