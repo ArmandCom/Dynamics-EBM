@@ -518,16 +518,16 @@ def sync_model(models): # Q: What is this about?
 
 def init_model(FLAGS, device, dataset):
     # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
     # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device)
-    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
 def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = None):
-    b_idx_1 = 9
-    b_idx_2 = 12
+    b_idx_1 = 11
+    b_idx_2 = 18
 
     print(FLAGS)
     if FLAGS.cuda:
@@ -553,7 +553,7 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
 
     # TODO: Initialization of nodes.
     #  Currently the initialization is taken from one of the datasets
-    feat = feats[0]
+    feat = feats[1]
 
     latents = []
     for mod_idx, model in enumerate(models):
@@ -564,10 +564,10 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
         latents.append(model.embed_latent(feat_enc, rel_rec, rel_send))
 
     mask = torch.ones(FLAGS.components).to(dev)
-    mask[rw_pair] = 0
+    # mask[rw_pair] = 0
 
     mask = mask * 0
-    # mask[rw_pair] = 1
+    mask[rw_pair] = 1
 
     # mask[3:] = 1
 
