@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles, TrajectoryDataset
-from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
@@ -147,6 +147,17 @@ parser.add_argument('--nodes', default=1, type=int, help='number of nodes for tr
 parser.add_argument('--gpus', default=1, type=int, help='number of gpus per nodes')
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
 parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
+
+def init_model(FLAGS, device, dataset):
+    # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
+    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = NodeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
+    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
+    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    models = [model for i in range(FLAGS.ensembles)]
+    optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
+    return models, optimizers
+
 
 def kl_categorical(preds, log_prior, num_atoms, eps=1e-16):
     """Based on https://github.com/ethanfetaya/NRI (MIT License)."""
@@ -332,7 +343,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
                 energy = models[ii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
-
+        feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
         #### FEATURE TEST #####
         # clamp_val, feat_grad_norm = .8, feat_grad.norm()
         # if feat_grad_norm > clamp_val:
@@ -346,7 +357,6 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         #### FEATURE TEST #####
 
         # KL Term computation ### From Compose visual relations ###
-        # Note: TODO: Review this approach
         if i == num_steps - 1 and not sample and FLAGS.kl:
             feat_neg_kl = feat_neg
             rand_idx = torch.randint(len(models), (1,))
@@ -369,7 +379,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
                                   feat_neg], dim=2)
 
         # latents = latents
-        feat_neg = torch.clamp(feat_neg, -1, 1)
+        feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: Clamp again for normalized
         feat_negs.append(feat_neg)
         feat_neg = feat_neg.detach()
         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
@@ -552,14 +562,6 @@ def sync_model(models): # Q: What is this about?
         for param in model.parameters():
             dist.broadcast(param.data, 0)
 
-def init_model(FLAGS, device, dataset):
-    # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
-    model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
-    models = [model for i in range(FLAGS.ensembles)]
-    optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
-    return models, optimizers
 
 def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
     if FLAGS.cuda:
@@ -585,7 +587,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
-        latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
+        latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
 
@@ -660,6 +662,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
+        edges = edges.to(dev)
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
 
@@ -667,7 +670,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
-        latent = models[0].embed_latent(feat_enc, rel_rec, rel_send)
+        latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
 
@@ -685,7 +688,11 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         # latent = (None, latent[..., 0])
         # Option 2
         mask = torch.randint(len(models), (FLAGS.batch_size, FLAGS.components)).to(dev)
+        # mask = torch.ones((FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
+        # Option 3
+        # latent = (None, weights[..., 0, 0])
+
 
         if False:
             feat_neg, feat_negs, feat_neg_kl, feat_grad = \
@@ -719,7 +726,8 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
                 torch.save(replay_buffer, replay_buffer_path)
             # print('Masks: {}'.format( latent[1][0].detach().cpu().numpy()))
-            print('Latents: {}'.format( latent[0][0,...,0].detach().cpu().numpy()))
+            if latent[0] is not None:
+                print('Latents: {}'.format( latent[0][0,...,0].detach().cpu().numpy()))
 
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
@@ -753,6 +761,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             loss = 0.0
             feat = feat.to(dev)
+            edges = edges.to(dev)
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
 
@@ -769,7 +778,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 latent, weights = latent
                 l2_w_loss = torch.pow(weights, 2).mean()
                 prod_w_loss = torch.prod(weights, 1).mean()
-                loss = loss - 0.001 * l2_w_loss + 0.001 * prod_w_loss
+                # loss = loss + 0.0005 * prod_w_loss - 0.0005 * l2_w_loss
             else: l2_w_loss = 0
 
             # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
@@ -800,6 +809,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
             # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
             latent = (latent, mask)
+            # Option 3
+            # latent = (None, weights[..., 0, 0])
 
             if sample_diff:
                 feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
@@ -811,8 +822,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             ## MSE Loss
                 ## Note: Backprop through all sampling
             feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-                ## Note: Backprop through 1 sampling step
-            # feat_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            feat_loss_l1 = torch.abs(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:]).mean()
 
             ## Compute losses
 
@@ -826,7 +836,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 loss = loss - mmd_loss
 
             if FLAGS.autoencode or FLAGS.cd_and_ae:
-                loss = loss + feat_loss
+                loss = loss + feat_loss #+ feat_loss_l1
 
             if not FLAGS.autoencode or FLAGS.cd_and_ae:
                 # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
@@ -922,8 +932,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
 
-            if it > 8000: # Note: Clip gradient to be very small after several iterations
-                [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models]
+            # if it > 8000:
+            #     [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
 
