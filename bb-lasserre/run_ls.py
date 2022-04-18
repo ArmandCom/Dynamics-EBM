@@ -18,6 +18,7 @@ from mpl_toolkits.mplot3d import proj3d
 matplotlib.rcParams['lines.linewidth'] = 2.0
 import seaborn as sns
 sns.reset_orig()
+from scipy.io import savemat
 
 ## PyTorch
 import torch
@@ -43,11 +44,11 @@ n_workers = 4
 device_id = 1
 order = 4
 dim = 10
-num_samples = 500
-pretrained = False
-freeze = False
+num_samples = 10000
+pretrained = True
+freeze = True
 kernel = False
-indep = True
+indep = False
 
 if indep: from SoS_batch import SoS_loss
 else: from SoS import SoS_loss
@@ -161,6 +162,8 @@ class CNNModel(nn.Module):
 		self.register_buffer('V', self.sos.vmap(torch.randn(self.sos.s, out_dim).abs().to(device)))
 		self.update_Minv()
 
+		self.samples = []
+
 	def update_V(self, X):
 		self.V = self.sos.vmap(X).detach().to(device)
 
@@ -171,6 +174,8 @@ class CNNModel(nn.Module):
 		if self.freeze:
 			with torch.no_grad():
 				x = self.cnn_layers(x)
+				# with torch.no_grad(): # Note: Only if we want to save features. Normally commented out.
+				# 	self.samples.extend(torch.tensor_split(x, x.shape[0]))
 		else: x = self.cnn_layers(x)
 		x = self.cnn_projection(x)
 		if self.V.device != x.device:
@@ -366,6 +371,7 @@ class DeepEnergyModel(pl.LightningModule):
 		inp_imgs = torch.cat([real_imgs, fake_imgs], dim=0)
 
 		feat, es = self.cnn(inp_imgs, sample_features=True)
+
 		real_out, fake_out = es.chunk(2, dim=0)
 		self.feat_buffer.save_features(feats=feat.chunk(2, dim=0)[0]) # Add the real features to the buffer
 
@@ -402,6 +408,22 @@ class DeepEnergyModel(pl.LightningModule):
 		self.log('val_contrastive_divergence', cdiv)
 		self.log('val_fake_out', fake_out.mean())
 		self.log('val_real_out', real_out.mean())
+
+### Note: Callbacks ###
+class SaveSamplesCallback(pl.Callback):
+
+	def on_epoch_end(self, trainer, pl_module):
+		# Skip for all other epochs
+		print('Saving {} elements...'.format(len(pl_module.cnn.samples)))
+		mdic = {'features_MNIST_pretrained': [sample.detach().cpu().numpy() for sample in pl_module.cnn.samples]}
+		savemat('/data/Armand/EBM/features_MNIST.mat', mdic)
+		print('Saved.')
+		s = input('Continue?')
+		if s == 'Y' or s == 'y':
+			pass
+		elif s == 'N' or s == 'N':
+			exit()
+		else: print('Incorrect answer.'); exit()
 
 ### Note: Callbacks ###
 class GenerateCallback(pl.Callback):
@@ -613,6 +635,7 @@ def train_model(**kwargs):
 						 gradient_clip_val=0.1,
 						 callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence'),
 									# GenerateCallback(every_n_epochs=5),
+									# SaveSamplesCallback(),
 									SamplerCallback(every_n_epochs=5),
 									OutlierCallback(),
 									# TransferCallback(test_loader,

@@ -12,11 +12,11 @@ parser.add_argument('--num-valid', type=int, default=1000,
                     help='Number of validation simulations to generate.')
 parser.add_argument('--num-test', type=int, default=1000,
                     help='Number of test simulations to generate.')
-parser.add_argument('--length', type=int, default=2000,
+parser.add_argument('--length', type=int, default=5000,
                     help='Length of trajectory.')
-parser.add_argument('--length-test', type=int, default=2000,
+parser.add_argument('--length-test', type=int, default=5000,
                     help='Length of test set trajectory.')
-parser.add_argument('--sample-freq', type=int, default=10,
+parser.add_argument('--sample-freq', type=int, default=100,
                     help='How often to sample the trajectory.')
 parser.add_argument('--n-balls', type=int, default=3,
                     help='Number of balls in the simulation.')
@@ -37,7 +37,7 @@ else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
-suffix += 'inter0.5_nowalls_sf10'
+suffix += 'inter0.5_nowalls_sf100_len5000'
 np.random.seed(args.seed)
 
 print(suffix)
