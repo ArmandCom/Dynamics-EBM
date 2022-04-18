@@ -216,7 +216,7 @@ class CNNLatentEncoder(nn.Module):
 		edges = torch.cat([senders, receivers], dim=2)
 		return edges
 
-	def forward(self, inputs, rel_rec, rel_send):
+	def forward(self, inputs, rel_rec, rel_send, true_edges=None):
 
 		# Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
 		edges = self.node2edge_temporal(inputs, rel_rec, rel_send)
@@ -235,9 +235,10 @@ class CNNLatentEncoder(nn.Module):
 		out = self.fc_out(x)
 
 		### Note: Test feature ###
-		tmp = linear_annealing(None, self.count, start_step=0, end_step=60000, start_value=1, end_value=0.05)
-		out = my_softmax(out/tmp, axis=-1)
-		self.count += 1
+		# tmp = linear_annealing(None, self.count, start_step=0, end_step=60000, start_value=1, end_value=0.05)
+		# out = my_softmax(out/tmp, axis=-1)
+		# self.count += 1
+
 		# hard = True
 		# if hard:
 		# 	shape = out.size()
@@ -251,7 +252,7 @@ class CNNLatentEncoder(nn.Module):
 		# 	y_hard = self.y_zeros.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
 		# 	out = Variable(y_hard - out.data) + out
 
-		# out = self.layernorm(out)
+		out = self.layernorm(out)
 		# out = F.sigmoid(out)
 		return out
 
@@ -262,14 +263,16 @@ class CNNEmbeddingLatentEncoder(nn.Module):
 
 		self.factor = factor
 
-		num_class = 4
+		num_class = 2
 		self.cnn = CNN(n_in * 2, n_hid // 2, n_hid, do_prob)
 		self.mlp1 = MLP(n_hid, n_hid, n_hid, do_prob)
 		self.mlp2 = MLP(n_hid, n_hid, n_hid, do_prob)
 		self.mlp3 = MLP(n_hid * 3, n_hid, n_hid, do_prob)
 		self.fc_out = nn.Linear(n_hid, 2 * num_class)
 
-		self.embedding = nn.Embedding(num_class, n_out, padding_idx=0) # Hardcoded
+		if num_class > 2:
+			self.embedding = nn.Embedding(num_class, n_out, padding_idx=0) #, padding_idx=0) # Hardcoded
+		else: self.embedding = nn.Embedding(num_class, n_out)
 
 		if self.factor:
 			print("Using factor graph CNN encoder.")
@@ -280,6 +283,7 @@ class CNNEmbeddingLatentEncoder(nn.Module):
 		self.y_zeros = None
 		self.layernorm = nn.LayerNorm(n_out)
 		self.count = 0
+		# self.register_buffer('count', torch.zeros((1)))
 
 	def init_weights(self):
 		for m in self.modules():
@@ -320,47 +324,55 @@ class CNNEmbeddingLatentEncoder(nn.Module):
 		edges = torch.cat([senders, receivers], dim=2)
 		return edges
 
-	def forward(self, inputs, rel_rec, rel_send):
+	def forward(self, inputs, rel_rec, rel_send, true_edges=None):
 
 		# Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
-		edges = self.node2edge_temporal(inputs, rel_rec, rel_send)
-		x = self.cnn(edges)
-		x = x.reshape(inputs.size(0), (inputs.size(1) - 1) * inputs.size(1), -1)
-		x = self.mlp1(x)
-		x_skip = x
 
-		if self.factor:
-			x = self.edge2node(x, rel_rec, rel_send)
-			x = self.mlp2(x)
+		if true_edges is None:
+			edges = self.node2edge_temporal(inputs, rel_rec, rel_send)
+			x = self.cnn(edges)
+			x = x.reshape(inputs.size(0), (inputs.size(1) - 1) * inputs.size(1), -1)
+			x = self.mlp1(x)
+			x_skip = x
 
-			x = self.node2edge(x, rel_rec, rel_send)
-			x = torch.cat((x, x_skip), dim=2)  # Skip connection
-			x = self.mlp3(x)
-		out = self.fc_out(x)
+			if self.factor:
+				x = self.edge2node(x, rel_rec, rel_send)
+				x = self.mlp2(x)
 
-		### Note: Test feature ###
-		outs = out.chunk(2, dim=-1)
-		tmp = linear_annealing(None, self.count, start_step=5000, end_step=60000, start_value=10, end_value=0.08)
-		weights = torch.stack([F.softmax(out/tmp, dim=-1) for out in outs], dim=-2)
-		if self.count % 400 == 0:
-			print('Selector: \n{}'.format(weights[0,:,0].detach().cpu().numpy()))
-		out = weights @ self.embedding.weight.clone()[None, None, ...]
-		self.count += 1
+				x = self.node2edge(x, rel_rec, rel_send)
+				x = torch.cat((x, x_skip), dim=2)  # Skip connection
+				x = self.mlp3(x)
+			out = self.fc_out(x)
+
+			### Note: Test feature ###
+			outs = out.chunk(2, dim=-1)
+			# tmp = linear_annealing(None, self.count, start_step=5000, end_step=60000, start_value=10, end_value=0.08)
+			tmp = 0.08
+			weights = torch.stack([F.softmax(out/tmp, dim=-1) for out in outs], dim=-2)
+
+			# hard = True
+			# if hard:
+			# 	shape = weights.size()
+			# 	_, k = weights.data.max(-1)
+			# 	# this bit is based on
+			# 	# https://discuss.pytorch.org/t/stop-gradients-for-st-gumbel-softmax/530/5
+			# 	if self.y_zeros is None:
+			# 		self.y_zeros = torch.zeros(*shape)
+			# 		if weights.is_cuda:
+			# 			self.y_zeros = self.y_zeros.to(weights.device)
+			# 	y_hard = self.y_zeros.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
+			# 	weights = Variable(y_hard - weights.data) + weights
+
+			if self.count % 400 == 0:
+				print('Selector: \n{}'.format(weights[0,:,0].detach().cpu().numpy()))
+			out = weights @ self.embedding.weight.clone()[None, None, ...]
+			self.count += 1
+		else:
+			weights = torch.stack([true_edges, true_edges], dim=2)
+			weights = torch.stack([weights, 1 - weights], dim=-1).float()
+			out = weights @ self.embedding.weight.clone()[None, None, ...]
 
 		### Note: First tests don't mix
 		out = out[:,:,0]
-
-		# hard = True
-		# if hard:
-		# 	shape = out.size()
-		# 	_, k = out.data.max(-1)
-		# 	# this bit is based on
-		# 	# https://discuss.pytorch.org/t/stop-gradients-for-st-gumbel-softmax/530/5
-		# 	if self.y_zeros is None:
-		# 		self.y_zeros = torch.zeros(*shape)
-		# 		if out.is_cuda:
-		# 			self.y_zeros = self.y_zeros.to(out.device)
-		# 	y_hard = self.y_zeros.zero_().scatter_(-1, k.view(shape[:-1] + (1,)), 1.0)
-		# 	out = Variable(y_hard - out.data) + out
 
 		return (out, weights)
