@@ -368,6 +368,7 @@ class ChargedParticles(data.Dataset):
 
         suffix = '_charged'+str(self.n_objects)
         suffix += '_nobox_05int-strength'
+        # suffix += 'inter0.5_nowalls_sf100_len5000'
         # suffix += 'inter0.5_nowalls_sf10'
 
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
@@ -423,7 +424,7 @@ class ChargedParticles(data.Dataset):
         num_atoms = loc.shape[3]
 
         # Note: unnormalize
-        print("Normalized Charged Dataset")
+
         loc_max = loc.max()
         loc_min = loc.min()
         vel = vel / 10
@@ -433,18 +434,13 @@ class ChargedParticles(data.Dataset):
         vel_max = vel.max()
         vel_min = vel.min()
 
+        print("Normalized Charged Dataset")
         # Normalize to [-1, 1]
         loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-        # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
         vel = vel * 2 / (loc_max - loc_min)
+        # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
 
         # print("Unnormalized Charged Dataset")
-        # loc_max = None
-        # loc_min = None
-        # vel_max = None
-        # vel_min = None
-        # loc = loc / 5.
-        # vel = vel / 5. #0. #TODO: Hardcoded
 
         # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
         loc = np.transpose(loc, [0, 3, 1, 2])
