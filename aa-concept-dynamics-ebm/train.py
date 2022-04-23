@@ -7,8 +7,8 @@ import numpy as np
 import torch.nn.functional as F
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-from dataset import ChargedParticlesSim, ChargedParticles, SpringsParticles, TrajectoryDataset
-from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from dataset import ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles, TrajectoryDataset
+from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_CNNOneStep_Light, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
@@ -111,7 +111,7 @@ parser.add_argument('--latent_hidden_dim', default=64, type=int, help='hidden di
 parser.add_argument('--latent_dim', default=64, type=int, help='dimension of the latent')
 parser.add_argument('--obj_id_dim', default=6, type=int, help='size of the object id embedding')
 parser.add_argument('--num_fixed_timesteps', default=5, type=int, help='constraints')
-parser.add_argument('--num_timesteps', default=19, type=int, help='constraints')
+parser.add_argument('--num_timesteps', default=49, type=int, help='constraints')
 
 parser.add_argument('--num_steps', default=10, type=int, help='Steps of gradient descent for training')
 parser.add_argument('--num_steps_test', default=40, type=int, help='Steps of gradient descent for training')
@@ -149,12 +149,16 @@ parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
 parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
 
 def init_model(FLAGS, device, dataset):
-    # model = EdgeGraphEBM_LateFusion(FLAGS, dataset).to(device)
-    model = EdgeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
-    # model = NodeGraphEBM_CNNOneStep(FLAGS, dataset).to(device)
-    # model = EdgeGraphEBM_OneStep(FLAGS, dataset).to(device) ### Note: OS model
-    # model = EdgeGraphEBM_CNN_OS_noF(FLAGS, dataset).to(device)
+    # modelname = EdgeGraphEBM_LateFusion
+    # modelname = EdgeGraphEBM_CNNOneStep
+    # modelname = EdgeGraphEBM_CNNOneStep_Light
+    modelname = NodeGraphEBM_CNNOneStep
+    # modelname = EdgeGraphEBM_OneStep
+    # modelname = EdgeGraphEBM_CNN_OS_noF
+
+    model = modelname(FLAGS, dataset).to(device)
     models = [model for i in range(FLAGS.ensembles)]
+    # models = [modelname(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
@@ -179,6 +183,9 @@ def kl_categorical_uniform(
 # log_prior = log_prior.unsqueeze(0).unsqueeze(0)
 # if args.cuda:
 #     log_prior = log_prior.cuda()
+def save_rel_matrices(model, rel_rec, rel_send):
+    if model.rel_rec is None and model.rel_send is None:
+        model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
 
 def gaussian_fn(M, std):
     n = torch.arange(0, M) - (M - 1.0) / 2.0
@@ -275,6 +282,233 @@ def gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat, ini_timeste
     FLAGS.num_fixed_timesteps = num_fixed_timesteps_old
     return feat_neg, feat_negs_all, feat_neg_kl, feat_grad
 
+# def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+#     feat_noise = torch.randn_like(feat_neg).detach()
+#     feat_negs_samples = []
+#
+#     num_fixed_timesteps = FLAGS.num_fixed_timesteps
+#
+#     ## Step
+#     step_lr = FLAGS.step_lr
+#     ini_step_lr = step_lr
+#
+#     ## Noise
+#     noise_coef = FLAGS.noise_coef
+#     ini_noise_coef = noise_coef
+#
+#     ## Momentum parameters
+#     momentum = FLAGS.momentum
+#     old_update = 0.0
+#
+#     feat_negs = [feat_neg]
+#
+#     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
+#     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
+#
+#     # TODO: Sample from buffer.
+#     s = feat.size()
+#
+#     # Num steps linear annealing
+#     if not sample:
+#         if FLAGS.num_steps_end != -1 and training_step > 0:
+#             num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+#
+#         #### FEATURE TEST ##### varying fixed steps
+#         # if random.random() < 0.5:
+#         #     num_fixed_timesteps = random.randint(3, num_fixed_timesteps)
+#         #### FEATURE TEST #####
+#
+#     if FLAGS.num_fixed_timesteps > 0:
+#         feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+#                               feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+#     feat_neg_kl = None
+#
+#     for i in range(num_steps):
+#         feat_noise.normal_()
+#
+#         ## Step - LR
+#         if FLAGS.step_lr_decay_factor != 1.0:
+#             step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+#         ## Add Noise
+#         if FLAGS.noise_decay_factor != 1.0:
+#             noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
+#         feat_neg = feat_neg + noise_coef * feat_noise
+#
+#         # Smoothing
+#         # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+#         #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+#
+#         # Compute energy
+#         latent_ii, mask = latent
+#         energy = 0
+#         curr_latent = latent
+#         for ii in range(len(models)):
+#             if ii == 1: curr_latent = (latent_ii, 1 - mask)
+#             if FLAGS.sample_ema:
+#                 energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
+#             else:
+#                 energy = models[ii].forward(feat_neg, curr_latent) + energy
+#         # Get grad for current optimization iteration.
+#         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
+#         feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
+#         #### FEATURE TEST #####
+#         # clamp_val, feat_grad_norm = .8, feat_grad.norm()
+#         # if feat_grad_norm > clamp_val:
+#         #     feat_grad = clamp_val * feat_grad / feat_grad_norm
+#         #### FEATURE TEST #####
+#
+#         #### FEATURE TEST #####
+#         # Gradient Dropout - Note: Testing.
+#         # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
+#         # feat_grad = feat_grad * update_mask
+#         #### FEATURE TEST #####
+#
+#         # KL Term computation ### From Compose visual relations ###
+#         if i == num_steps - 1 and not sample and FLAGS.kl:
+#             feat_neg_kl = feat_neg
+#             rand_idx = torch.randint(len(models), (1,))
+#             energy = models[rand_idx].forward(feat_neg_kl, latent)
+#             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
+#             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
+#             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
+#
+#         ## Momentum update
+#         if FLAGS.momentum > 0:
+#             update = FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] + momentum * old_update
+#             feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - update # GD computation
+#             old_update = update
+#         else:
+#             feat_neg = feat_neg[:, :,  num_fixed_timesteps:] - FLAGS.step_lr * feat_grad[:, :,  num_fixed_timesteps:] # GD computation
+#
+#
+#         if num_fixed_timesteps > 0:
+#             feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+#                                   feat_neg], dim=2)
+#
+#         # latents = latents
+#         feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: Clamp again for normalized
+#         feat_negs.append(feat_neg)
+#         feat_neg = feat_neg.detach()
+#         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+#
+#     return feat_neg, feat_negs, feat_neg_kl, feat_grad
+
+# def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+#     feat_noise = torch.randn_like(feat_neg).detach()
+#     feat_negs_samples = []
+#
+#     num_fixed_timesteps = FLAGS.num_fixed_timesteps
+#
+#     ## Step
+#     step_lr = FLAGS.step_lr
+#     ini_step_lr = step_lr
+#
+#     ## Noise
+#     noise_coef = FLAGS.noise_coef
+#     ini_noise_coef = noise_coef
+#
+#     ## Momentum parameters
+#     momentum = FLAGS.momentum
+#     old_update = 0.0
+#
+#     feat_negs = [feat_neg]
+#
+#     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
+#     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
+#
+#     # TODO: Sample from buffer.
+#     s = feat.size()
+#
+#     # Num steps linear annealing
+#     if not sample:
+#         if FLAGS.num_steps_end != -1 and training_step > 0:
+#             num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+#
+#     fixed_mask = torch.zeros_like(feat_neg)
+#     fixed_mask[:, :, 0] = 1
+#     if FLAGS.num_fixed_timesteps > 0:
+#         #         feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+#         #                               feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+#         indices = torch.randint(feat_neg.shape[2]-num_fixed_timesteps+1,
+#                               (feat_neg.shape[0],))
+#         for fixed_id in range(num_fixed_timesteps):
+#             indices += fixed_id
+#             fixed_mask[torch.arange(0,feat_neg.shape[0]), :, indices, :] = 1
+#             feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
+#
+#     feat_neg_kl = None
+#
+#     for i in range(num_steps):
+#         feat_noise.normal_()
+#
+#         ## Step - LR
+#         if FLAGS.step_lr_decay_factor != 1.0:
+#             step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+#         ## Add Noise
+#         if FLAGS.noise_decay_factor != 1.0:
+#             noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
+#         feat_neg = feat_neg + noise_coef * feat_noise
+#
+#         # Smoothing
+#         # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
+#         #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
+#
+#         # Compute energy
+#         latent_ii, mask = latent
+#         energy = 0
+#         curr_latent = latent
+#         for ii in range(2):
+#             for iii in range(len(models)//2):
+#                 if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+#                 else:           curr_latent = (latent_ii[..., iii, :],     mask)
+#                 if FLAGS.sample_ema:
+#                     energy = models_ema[ii*2 + iii].forward(feat_neg, curr_latent) + energy
+#                 else:
+#                     energy = models[ii*2 + iii].forward(feat_neg, curr_latent) + energy
+#         # Get grad for current optimization iteration.
+#         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
+#         feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
+#         #### FEATURE TEST #####
+#         # clamp_val, feat_grad_norm = .8, feat_grad.norm()
+#         # if feat_grad_norm > clamp_val:
+#         #     feat_grad = clamp_val * feat_grad / feat_grad_norm
+#         #### FEATURE TEST #####
+#
+#         #### FEATURE TEST #####
+#         # Gradient Dropout - Note: Testing.
+#         # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
+#         # feat_grad = feat_grad * update_mask
+#         #### FEATURE TEST #####
+#
+#         # KL Term computation ### From Compose visual relations ###
+#         if i == num_steps - 1 and not sample and FLAGS.kl:
+#             feat_neg_kl = feat_neg
+#             rand_idx = torch.randint(len(models), (1,))
+#             energy = models[rand_idx].forward(feat_neg_kl, latent)
+#             feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
+#             feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
+#             feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
+#
+#         ## Momentum update
+#         if FLAGS.momentum > 0:
+#             update = FLAGS.step_lr * feat_grad * (1-fixed_mask) + momentum * old_update
+#             feat_neg = feat_neg * (1-fixed_mask) - update # GD computation
+#             old_update = update
+#         else:
+#             feat_neg = feat_neg * (1-fixed_mask) - FLAGS.step_lr * feat_grad * (1-fixed_mask) # GD computation
+#
+#
+#         if num_fixed_timesteps > 0:
+#             feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
+#
+#         # latents = latents
+#         feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: Clamp again for normalized
+#         feat_negs.append(feat_neg)
+#         feat_neg = feat_neg.detach()
+#         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
+#
+#     return feat_neg, feat_negs, feat_neg_kl, feat_grad
+
 def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
@@ -304,7 +538,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
     # Num steps linear annealing
     if not sample:
         if FLAGS.num_steps_end != -1 and training_step > 0:
-            num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+            num_steps = int(linear_annealing(None, training_step, start_step=20000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
 
         #### FEATURE TEST ##### varying fixed steps
         # if random.random() < 0.5:
@@ -386,7 +620,8 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
 
     return feat_neg, feat_negs, feat_neg_kl, feat_grad
 
-# gen trajectories with differential sampling ###
+### gen trajectories with differential sampling ###
+
 def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
     assert FLAGS.num_fixed_timesteps > 0 # In this case, we are encoding velocities and therefore we need at least one GT point.
 
@@ -562,7 +797,6 @@ def sync_model(models): # Q: What is this about?
         for param in model.parameters():
             dist.broadcast(param.data, 0)
 
-
 def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger = None):
     if FLAGS.cuda:
         dev = torch.device("cuda")
@@ -581,7 +815,10 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         rel_send = rel_send.to(dev)
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
+        [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
+        b_idx = 5
+        b_idx_ref = 13
 
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
@@ -590,16 +827,15 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
-
         pairs = get_rel_pairs(rel_send, rel_rec)
-        rw_pair = pairs[1]
+        rw_pair = pairs[0]
         affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
 
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
         # feat = normalize_trajectories(feat)
 
-        b_idx_ref = 10
+
         mask = torch.ones(FLAGS.components).to(dev)
         # mask[rw_pair] = 0
         # latent = latent * mask[None, :, None]
@@ -628,8 +864,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             #                   ini_timesteps=7, stride=1, stage_steps=[40, 20, 40])
         # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
         if save:
-            b_idx = 5
-            print('Latent: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
+            print('Latents: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
             # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
             # Path(savedir).mkdir(parents=True, exist_ok=True)
             # savename = "s%08d"% (step)
@@ -727,7 +962,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 torch.save(replay_buffer, replay_buffer_path)
             # print('Masks: {}'.format( latent[1][0].detach().cpu().numpy()))
             if latent[0] is not None:
-                print('Latents: {}'.format( latent[0][0,...,0].detach().cpu().numpy()))
+                print('Latents: \n{}'.format( latent[0][0,...,0].detach().cpu().numpy()))
 
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
@@ -764,6 +999,22 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             edges = edges.to(dev)
             rel_rec = rel_rec.to(dev)
             rel_send = rel_send.to(dev)
+            if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec, rel_send) for model in models]
+
+            #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
+            # feat_noise = torch.randn_like(feat).detach()
+            # feat_noise.normal_()
+            # feat = feat + 0.001 * feat_noise
+            #### Note: Opt. 2 ####
+            feat_copy = feat.clone()
+            max_loc = feat[..., :2].abs().max()
+            max_vel = feat[..., 2:].abs().max()
+            # feat_noise = torch.randn_like(feat).detach()
+            # feat_noise.normal_()
+            # feat_noise[..., :2] *= max_loc
+            # feat_noise[..., 2:] *= max_vel
+            # feat = feat + 0.002 * feat_noise
+            #### Note: TEST FEATURE ####
 
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
@@ -777,18 +1028,24 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if isinstance(latent, tuple):
                 latent, weights = latent
                 l2_w_loss = torch.pow(weights, 2).mean()
-                prod_w_loss = torch.prod(weights, 1).mean()
+                # prod_w_loss = torch.prod(weights, 1).mean()
                 # loss = loss + 0.0005 * prod_w_loss - 0.0005 * l2_w_loss
             else: l2_w_loss = 0
 
             # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
-            feat = feat[:, :, :10]
+            # len_feat = torch.randint(10, 18)
+            # idx_feat = torch.randint(0, feat.shape[2]-len_feat)
+            # feat = feat[:, :, idx_feat:idx_feat + len_feat]
 
-            #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
-            # feat_noise = torch.randn_like(feat).detach()
-            # feat_noise.normal_()
-            # feat = feat + 0.001 * feat_noise
-            #### Note: TEST FEATURE ####
+            ### Note: For OS model
+            # feat = feat[:, :, :12]
+
+            # TODO: Probably not the most efficient way to do it.
+            feat_noise = torch.randn_like(feat).detach()
+            feat_noise.normal_()
+            feat_noise[..., :2] *= max_loc
+            feat_noise[..., 2:] *= max_vel
+            feat = feat_copy + 0.002 * feat_noise
 
             latent_norm = latent.norm()
 
@@ -932,8 +1189,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             #     grad_norm_ema = torch.norm(feat_grad)
             # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
 
-            # if it > 8000:
-            #     [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
+            if it > 30000:
+                [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
             # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
             # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
 
@@ -1063,6 +1320,9 @@ def main_single(rank, FLAGS):
     elif FLAGS.dataset == 'charged_sim':
         dataset = ChargedParticlesSim(FLAGS)
         test_dataset = dataset
+    elif FLAGS.dataset == 'charged-springs':
+        dataset = ChargedSpringsParticles(FLAGS, 'train')
+        test_dataset = ChargedSpringsParticles(FLAGS, 'test')
     else:
         raise NotImplementedError
     FLAGS.timesteps = FLAGS.num_timesteps

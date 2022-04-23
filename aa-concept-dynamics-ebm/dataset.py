@@ -407,7 +407,6 @@ class ChargedParticles(data.Dataset):
         #     im_corrupt = 0.5 + 0.5 * torch.randn(self.image_size, self.image_size, 3)
         # else:
         #     raise NotImplementedError
-
         return (torch.tensor(self.feat[index]), torch.tensor(self.edges[index])), \
                (torch.tensor(self.rel_rec), torch.tensor(self.rel_send)), index
 
@@ -462,7 +461,6 @@ class ChargedParticles(data.Dataset):
         # data_loader = DataLoader(data, batch_size=batch_size)
         # TODO: we need a way to encode the walls. Maybe add the minmax.
         return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
-
 
 ### DATASET LOADER FROM FQA
 import pandas as pd
