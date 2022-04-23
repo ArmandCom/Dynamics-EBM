@@ -367,8 +367,114 @@ class ChargedParticles(data.Dataset):
         self.n_objects = args.n_objects
 
         suffix = '_charged'+str(self.n_objects)
-        suffix += '_nobox_05int-strength'
-        # suffix += 'inter0.5_nowalls_sf100_len5000'
+        # suffix += '_nobox_05int-strength'
+        suffix += 'inter0.5_nowalls_sf100_len5000'
+
+        # suffix += 'inter0.5_nowalls_sf10'
+
+        feat, edges, stats = self._load_data(suffix=suffix, split=split)
+        # TODO: loc_max, loc_min, vel_max, vel_min
+        assert self.n_objects == feat.shape[1]
+        self.length = feat.shape[0]
+        self.timesteps = args.num_timesteps #feat.shape[2]
+
+        # visualize_trajectories(torch.tensor(feat), None, torch.tensor(edges))
+
+        # self.box_size = 5.
+        # self.loc_std = 1.
+        # self.vel_norm = 0.5
+        # self.interaction_strength = args.interaction_strength
+        # self.noise_var = args.noise_var
+        # self.sample_freq = args.sample_freq # default: 100
+        # self.sequence_length = args.sequence_length # default: 1000
+
+        # Generate off-diagonal interaction graph
+        self.feat, self.edges = feat[:, :, :self.timesteps], edges
+
+
+        off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
+        self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
+        self.rel_send = np.array(encode_onehot(np.where(off_diag)[1]), dtype=np.float32)
+
+    def __getitem__(self, index):
+        """Return a data point and its metadata information.
+
+        Parameters:
+            index - - a random integer for data indexing
+        """
+        # if self.datasource == 'default':
+        #     im_corrupt = im + 0.3 * torch.randn(self.image_size, self.image_size, 3)
+        # elif self.datasource == 'random':
+        #     im_corrupt = 0.5 + 0.5 * torch.randn(self.image_size, self.image_size, 3)
+        # else:
+        #     raise NotImplementedError
+
+        return (torch.tensor(self.feat[index]), torch.tensor(self.edges[index])), \
+               (torch.tensor(self.rel_rec), torch.tensor(self.rel_send)), index
+
+    def __len__(self):
+        """Return the total number of trajectories in the dataset."""
+        return self.length
+
+    def _load_data(self, suffix='', split='train'):
+        loc = np.load('/data/Armand/NRI/loc_' + split + suffix + '.npy')
+        vel = np.load('/data/Armand/NRI/vel_' + split + suffix + '.npy')
+        edges = np.load('/data/Armand/NRI/edges_' + split + suffix + '.npy')
+
+        # [num_samples, num_timesteps, num_dims, num_atoms]
+        num_atoms = loc.shape[3]
+
+        # Note: unnormalize
+
+        loc_max = loc.max()
+        loc_min = loc.min()
+        vel = vel / 10
+        # Note: In simulation our increase in T (delta T) is 0.001.
+        #  Then we sample 1/10 generated samples.
+        #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
+        vel_max = vel.max()
+        vel_min = vel.min()
+
+        print("Normalized Charged Dataset")
+        # Normalize to [-1, 1]
+        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        vel = vel * 2 / (loc_max - loc_min)
+        # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+        # print("Unnormalized Charged Dataset")
+
+        # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
+        loc = np.transpose(loc, [0, 3, 1, 2])
+        vel = np.transpose(vel, [0, 3, 1, 2])
+        feat = np.concatenate([loc, vel], axis=3)
+        edges = np.reshape(edges, [-1, num_atoms ** 2])
+        edges = np.array((edges + 1) / 2, dtype=np.int64)
+
+        feat = torch.FloatTensor(feat)
+        edges = torch.LongTensor(edges)
+
+        # Exclude self edges
+        off_diag_idx = np.ravel_multi_index(
+            np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+            [num_atoms, num_atoms])
+        edges = edges[:, off_diag_idx]
+
+        # data = TensorDataset(feat, edges)
+        # data_loader = DataLoader(data, batch_size=batch_size)
+        # TODO: we need a way to encode the walls. Maybe add the minmax.
+        return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
+
+class ChargedSpringsParticles(data.Dataset):
+    def __init__(self, args, split):
+        # n_balls=5, box_size=5., loc_std=1., vel_norm=0.5,
+        # interaction_strength=1., noise_var=0.):
+        self.args = args
+        self.n_objects = args.n_objects
+
+        suffix = '_charged-springs'+str(self.n_objects)
+        # suffix += '_nobox_05int-strength'
+        suffix += 'inter0.5_nowalls_sf100_len5000_test-mixed'
+
         # suffix += 'inter0.5_nowalls_sf10'
 
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
