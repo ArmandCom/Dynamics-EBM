@@ -569,12 +569,14 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         latent_ii, mask = latent
         energy = 0
         curr_latent = latent
-        for ii in range(len(models)):
-            if ii == 1: curr_latent = (latent_ii, 1 - mask)
-            if FLAGS.sample_ema:
-                energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
-            else:
-                energy = models[ii].forward(feat_neg, curr_latent) + energy
+        for ii in range(2):
+            for iii in range(len(models)//2):
+                if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+                else:           curr_latent = (latent_ii[..., iii, :],     mask)
+                if FLAGS.sample_ema:
+                    energy = models_ema[ii*2 + iii].forward(feat_neg, curr_latent) + energy
+                else:
+                    energy = models[ii*2 + iii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
         feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
@@ -676,7 +678,7 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
 
 
     #### FEATURE TEST #### TODO: Not fine yet
-    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.01 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
+    delta_neg = torch.randn_like(feat_var[:, :, 1:]) * 0.0 #01 #(feat_var[:, :, 1:] - feat_var[:, :, :-1])
     delta_neg.requires_grad_(requires_grad=True)
 
     feat_var_ini = feat_var[:, :, 0:1]
@@ -713,16 +715,17 @@ def gen_trajectories_diff (latent, FLAGS, models, models_ema, feat_neg, feat, nu
         latent_ii, mask = latent
         energy = 0
         curr_latent = latent
-        for ii in range(len(models)):
-            if ii == 1: curr_latent = (latent_ii, 1 - mask)
-            if FLAGS.sample_ema:
-                energy = models_ema[ii].forward(feat_neg, curr_latent) + energy
-            else:
-                energy = models[ii].forward(feat_neg, curr_latent) + energy
+        for ii in range(2):
+            for iii in range(len(models)//2):
+                if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+                else:           curr_latent = (latent_ii[..., iii, :],     mask)
+                if FLAGS.sample_ema:
+                    energy = models_ema[ii*2 + iii].forward(feat_neg, curr_latent) + energy
+                else:
+                    energy = models[ii*2 + iii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         delta_grad, = torch.autograd.grad([energy.sum()], [delta_neg], create_graph=create_graph)
-        # feat_grad_2, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph) # Note: Only to evaluate expression
-
+        delta_grad = torch.clamp(delta_grad, min=-0.5, max=0.5) # TODO: Remove if useless
         # TODO: Calculate grads without taking into account the fixed points.
 
         #### FEATURE TEST #####
@@ -922,7 +925,7 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         # Option 1: Test New feature --> EBM selector
         # latent = (None, latent[..., 0])
         # Option 2
-        mask = torch.randint(len(models), (FLAGS.batch_size, FLAGS.components)).to(dev)
+        mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
         # mask = torch.ones((FLAGS.batch_size, FLAGS.components)).to(dev)
         latent = (latent, mask)
         # Option 3
@@ -1462,7 +1465,7 @@ def main_single(rank, FLAGS):
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 2
+    FLAGS.ensembles = 4
     FLAGS.tie_weight = True
     FLAGS.sample = True
     FLAGS.exp = FLAGS.dataset
