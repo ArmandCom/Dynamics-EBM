@@ -1,12 +1,12 @@
-from synthetic_sim import ChargedParticlesSim, SpringSim
+from synthetic_sim import ChargedParticlesSim, SpringSim, ChargedSpringsParticlesSim
 import time
 import numpy as np
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--simulation', type=str, default='charged',
+parser.add_argument('--simulation', type=str, default='charged-springs',
                     help='What simulation to generate.')
-parser.add_argument('--num-train', type=int, default=50000,
+parser.add_argument('--num-train', type=int, default=5000,
                     help='Number of training simulations to generate.')
 parser.add_argument('--num-valid', type=int, default=1000,
                     help='Number of validation simulations to generate.')
@@ -33,11 +33,17 @@ elif args.simulation == 'charged':
                               box_size=float('inf'), loc_std=1., vel_norm=0.5,
                               interaction_strength=.5)
     suffix = '_charged'
+elif args.simulation == 'charged-springs':
+    sim = ChargedSpringsParticlesSim(noise_var=0.0, n_balls=args.n_balls,
+                              box_size=float('inf'), loc_std=1., vel_norm=0.5,
+                              interaction_strength=.5)
+    suffix = '_charged-springs'
 else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
-suffix += 'inter0.5_nowalls_sf100_len5000'
+suffix += 'inter0.5_nowalls_sf100_len5000_test-mixed'
+# suffix += 'inter0.5_nowalls_sf100_len5000'
 np.random.seed(args.seed)
 
 print(suffix)

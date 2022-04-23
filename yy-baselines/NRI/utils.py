@@ -116,17 +116,18 @@ def binary_accuracy(output, labels):
 
 
 def load_data(batch_size=1, suffix=''):
-    loc_train = np.load('data/loc_train' + suffix + '.npy')
-    vel_train = np.load('data/vel_train' + suffix + '.npy')
-    edges_train = np.load('data/edges_train' + suffix + '.npy')
+    data_root = '/data/Armand/NRI'
+    loc_train = np.load(data_root + '/loc_train' + suffix + '.npy')
+    vel_train = np.load(data_root + '/vel_train' + suffix + '.npy')
+    edges_train = np.load(data_root + '/edges_train' + suffix + '.npy')
 
-    loc_valid = np.load('data/loc_valid' + suffix + '.npy')
-    vel_valid = np.load('data/vel_valid' + suffix + '.npy')
-    edges_valid = np.load('data/edges_valid' + suffix + '.npy')
+    loc_valid = np.load(data_root + '/loc_valid' + suffix + '.npy')
+    vel_valid = np.load(data_root + '/vel_valid' + suffix + '.npy')
+    edges_valid = np.load(data_root + '/edges_valid' + suffix + '.npy')
 
-    loc_test = np.load('data/loc_test' + suffix + '.npy')
-    vel_test = np.load('data/vel_test' + suffix + '.npy')
-    edges_test = np.load('data/edges_test' + suffix + '.npy')
+    loc_test = np.load(data_root + '/loc_test' + suffix + '.npy')
+    vel_test = np.load(data_root + '/vel_test' + suffix + '.npy')
+    edges_test = np.load(data_root + '/edges_test' + suffix + '.npy')
 
     # [num_samples, num_timesteps, num_dims, num_atoms]
     num_atoms = loc_train.shape[3]

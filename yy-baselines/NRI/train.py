@@ -6,7 +6,7 @@ import argparse
 import pickle
 import os
 import datetime
-from pathlib import Path
+# from pathlib import Path
 import torch.optim as optim
 from torch.optim import lr_scheduler
 
@@ -235,9 +235,9 @@ def train(epoch, best_val_loss):
         loss.backward()
         optimizer.step()
 
-        mse_train.append(F.mse_loss(output, target).data[0])
-        nll_train.append(loss_nll.data[0])
-        kl_train.append(loss_kl.data[0])
+        mse_train.append(F.mse_loss(output, target).item())
+        nll_train.append(loss_nll.item())
+        kl_train.append(loss_kl.item())
 
     nll_val = []
     acc_val = []
@@ -266,9 +266,9 @@ def train(epoch, best_val_loss):
         acc = edge_accuracy(logits, relations)
         acc_val.append(acc)
 
-        mse_val.append(F.mse_loss(output, target).data[0])
-        nll_val.append(loss_nll.data[0])
-        kl_val.append(loss_kl.data[0])
+        mse_val.append(F.mse_loss(output, target).item())
+        nll_val.append(loss_nll.item())
+        kl_val.append(loss_kl.item())
 
     print('Epoch: {:04d}'.format(epoch),
           'nll_train: {:.10f}'.format(np.mean(nll_train)),
@@ -335,9 +335,9 @@ def test():
         acc = edge_accuracy(logits, relations)
         acc_test.append(acc)
 
-        mse_test.append(F.mse_loss(output, target).data[0])
-        nll_test.append(loss_nll.data[0])
-        kl_test.append(loss_kl.data[0])
+        mse_test.append(F.mse_loss(output, target).item())
+        nll_test.append(loss_nll.item())
+        kl_test.append(loss_kl.item())
 
         # For plotting purposes
         if args.decoder == 'rnn':

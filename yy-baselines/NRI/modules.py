@@ -112,6 +112,7 @@ class MLPEncoder(nn.Module):
 
     def edge2node(self, x, rel_rec, rel_send):
         # NOTE: Assumes that we have the same graph across all samples.
+        # print(x.shape, rel_rec.shape); exit() #((128, 20, 256), (20, 5))
         incoming = torch.matmul(rel_rec.t(), x)
         return incoming / incoming.size(1)
 
@@ -196,6 +197,7 @@ class CNNEncoder(nn.Module):
 
     def edge2node(self, x, rel_rec, rel_send):
         # NOTE: Assumes that we have the same graph across all samples.
+        # print(x.shape, rel_rec.shape); exit() #((128, 20, 256), (20, 5))
         incoming = torch.matmul(rel_rec.t(), x)
         return incoming / incoming.size(1)
 
@@ -467,7 +469,10 @@ class MLPDecoder(nn.Module):
             all_msgs += msg
 
         # Aggregate all msgs to receiver
+        # print(rel_rec[0], rel_rec.shape, all_msgs.shape)
         agg_msgs = all_msgs.transpose(-2, -1).matmul(rel_rec).transpose(-2, -1)
+        # print(agg_msgs.shape, single_timestep_inputs.shape)
+        # exit()
         agg_msgs = agg_msgs.contiguous()
 
         # Skip connection
