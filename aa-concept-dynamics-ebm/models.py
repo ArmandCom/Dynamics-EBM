@@ -634,10 +634,10 @@ class NodeGraphEBM_CNNOneStep(nn.Module):
             self.obj_embedding = NodeID(args)
 
         self.cnn = CNNBlock(state_dim * 2, filter_dim, filter_dim, do_prob, kernel_size=kernel_size, spectral_norm=spectral_norm)
-        # self.skip_cnn = CNNBlock(state_dim, filter_dim, filter_dim, do_prob, kernel_size=kernel_size, spectral_norm=spectral_norm)
+        self.skip_cnn = CNNBlock(state_dim, filter_dim, filter_dim, do_prob, kernel_size=kernel_size, stride=2, spectral_norm=spectral_norm)
 
         self.mlp1_trans = MLPBlock(filter_dim, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
-        self.mlp1 = MLPBlock(filter_dim, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
+        self.mlp1 = MLPBlock(filter_dim * 2, filter_dim, filter_dim, do_prob, spectral_norm=spectral_norm)
 
         if spectral_norm:
             self.cnn = sn(nn.Conv1d(state_dim * 2, filter_dim, kernel_size))
@@ -767,7 +767,7 @@ class NodeGraphEBM_CNNOneStep(nn.Module):
             latent = latent * mask[..., None]
 
         # Process skip connection
-        # x_skip = swish(self.skip_cnn(inputs.flatten(0,1).permute(0, 2, 1)).mean(-1)).reshape(BS, NO, -1)
+        x_skip = swish(self.skip_cnn(inputs.flatten(0,1).permute(0, 2, 1))).mean(-1).reshape(BS, NO, -1)
         # x_skip = inputs
 
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
@@ -783,7 +783,7 @@ class NodeGraphEBM_CNNOneStep(nn.Module):
 
         # x = x.reshape(BS, NR, *x.shape[-2:])
         # x = self.edge2node_temporal(x, rel_rec, rel_send) # [R, F] --> [N, F] # marshalling
-        # x = torch.cat((x, x_skip), dim=2)
+        x = torch.cat((x, x_skip), dim=2)
 
         x = swish(self.mlp1(x)) # [N, F] --> [N, F]
         energy_cnn = self.energy_map_cnn(x).squeeze(-1) # [R, F] --> [R, 1] # Project features to scalar
@@ -1390,20 +1390,20 @@ class CondMLPResBlock1d(nn.Module):
         return x_out
 
 class CNNBlock(nn.Module):
-    def __init__(self, n_in, n_hid, n_out, do_prob=0., kernel_size = 5, spectral_norm = False):
+    def __init__(self, n_in, n_hid, n_out, do_prob=0., kernel_size = 5, stride=1, spectral_norm = False):
         super(CNNBlock, self).__init__()
         self.pool = nn.MaxPool1d(kernel_size=2, stride=None, padding=0,
                                  dilation=1, return_indices=False,
                                  ceil_mode=False)
 
         if spectral_norm:
-            self.conv1 = sn(nn.Conv1d(n_in, n_hid, kernel_size=kernel_size, stride=1, padding=0))
-            self.conv2 = sn(nn.Conv1d(n_hid, n_hid, kernel_size=kernel_size, stride=1, padding=0))
+            self.conv1 = sn(nn.Conv1d(n_in, n_hid, kernel_size=kernel_size, stride=stride, padding=0))
+            self.conv2 = sn(nn.Conv1d(n_hid, n_hid, kernel_size=kernel_size, stride=stride, padding=0))
             self.conv_predict = sn(nn.Conv1d(n_hid, n_out, kernel_size=1))
             self.conv_attention = sn(nn.Conv1d(n_hid, 1, kernel_size=1))
         else:
-            self.conv1 = nn.Conv1d(n_in, n_hid, kernel_size=kernel_size, stride=1, padding=0)
-            self.conv2 = nn.Conv1d(n_hid, n_hid, kernel_size=kernel_size, stride=1, padding=0)
+            self.conv1 = nn.Conv1d(n_in, n_hid, kernel_size=kernel_size, stride=stride, padding=0)
+            self.conv2 = nn.Conv1d(n_hid, n_hid, kernel_size=kernel_size, stride=stride, padding=0)
             self.conv_predict = nn.Conv1d(n_hid, n_out, kernel_size=1)
             self.conv_attention = nn.Conv1d(n_hid, 1, kernel_size=1)
 
