@@ -6,7 +6,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--simulation', type=str, default='charged-springs',
                     help='What simulation to generate.')
-parser.add_argument('--num-train', type=int, default=5000,
+parser.add_argument('--num-train', type=int, default=50000,
                     help='Number of training simulations to generate.')
 parser.add_argument('--num-valid', type=int, default=1000,
                     help='Number of validation simulations to generate.')
@@ -42,7 +42,8 @@ else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
-suffix += 'inter0.5_nowalls_sf100_len5000_test-mixed'
+# suffix += 'inter0.5_nowalls_sf100_len50000_test-mixed'
+suffix += 'inter0.5_nowalls_sf100_len50000_test-mixed_byNodeType'
 # suffix += 'inter0.5_nowalls_sf100_len5000'
 np.random.seed(args.seed)
 

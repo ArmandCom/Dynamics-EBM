@@ -139,7 +139,6 @@ class SpringSim(object):
             vel += np.random.randn(T_save, 2, self.n_balls) * self.noise_var
             return loc, vel, edges
 
-
 class ChargedParticlesSim(object):
     def __init__(self, n_balls=5, box_size=5., loc_std=1., vel_norm=0.5,
                  interaction_strength=1., noise_var=0.):
@@ -433,9 +432,21 @@ class ChargedSpringsParticlesSim(object):
             assert (np.abs(forces_charged_size[diag_mask]).min() > 1e-10)
 
             # Note: Force selector
-            edge_selection_mask = np.random.uniform(0,1,size=(self.n_balls, self.n_balls))
-            edge_selection_mask[edge_selection_mask < new_edge_prob] = 0
-            edge_selection_mask[edge_selection_mask >= new_edge_prob] = 1
+            # edge_selection_mask = np.random.randint(0,2, size=(self.n_balls, self.n_balls)) # option 1
+            # edge_selection_mask = np.random.uniform(0,1,size=(self.n_balls, self.n_balls)) # option 2
+            # edge_selection_mask[edge_selection_mask < new_edge_prob] = 0
+            # edge_selection_mask[edge_selection_mask >= new_edge_prob] = 1
+
+            edge_selection_mask = np.random.randint(0,2, size=(self.n_balls, 1)).repeat(self.n_balls, 1)
+
+            ## Note: Test if mixing is correct.
+            # a = np.concatenate((
+            #     np.subtract.outer(loc_next[0, :],
+            #                       loc_next[0, :]).reshape(1, n, n),
+            #     np.subtract.outer(loc_next[1, :],
+            #                       loc_next[1, :]).reshape(1, n, n)))
+            # b = edge_selection_mask * a
+            # c = b.sum(-1)
 
             forces_size = edge_selection_mask * forces_springs_size + \
                           (1 - edge_selection_mask) * forces_charged_size
