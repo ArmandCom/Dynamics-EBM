@@ -369,7 +369,6 @@ class ChargedParticles(data.Dataset):
         suffix = '_charged'+str(self.n_objects)
         # suffix += '_nobox_05int-strength'
         suffix += 'inter0.5_nowalls_sf100_len5000'
-
         # suffix += 'inter0.5_nowalls_sf10'
 
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
@@ -389,8 +388,10 @@ class ChargedParticles(data.Dataset):
         # self.sequence_length = args.sequence_length # default: 1000
 
         # Generate off-diagonal interaction graph
-        self.feat, self.edges = feat[:, :, :self.timesteps], edges
-
+        ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
+        batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
+        ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
+        self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
         self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
