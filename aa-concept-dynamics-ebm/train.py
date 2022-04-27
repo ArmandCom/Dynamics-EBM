@@ -1,6 +1,5 @@
 import torch
 import time
-from models import EdgeGraphEBM_OneStep # TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 from scipy.linalg import toeplitz
 # from tensorflow.python.platform import flags
 import numpy as np
@@ -976,13 +975,6 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
             replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
 
         if save:
-            # feat_negs = torch.stack(feat_negs, dim=1)
-            # feat_negs = feat_negs
-            # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
-            # Path(savedir).mkdir(parents=True, exist_ok=True)
-            # savename = "s%08d"% (step)
-            # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            # logger.add_figure('test_gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             for i_plt in range(len(feat_negs)):
                 logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
@@ -1049,10 +1041,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
             else: feat_enc = feat
-            if FLAGS.normalize_data_latent:
-                feat_enc = normalize_trajectories(feat_enc, augment=True)
-            rand_idx = torch.randint(2, (1,))
-            latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send)
+            feat_enc = normalize_trajectories(feat_enc, augment=True, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
+            rand_idx = torch.randint(len(models), (1,))
+            latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
 
             # Note: Test feature
             if isinstance(latent, tuple):
