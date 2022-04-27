@@ -657,6 +657,10 @@ def normalize_trajectories(state, augment=False, normalize=True):
     if augment:
         state = augment_trajectories(state, 'random')
 
+    # loc, vel = state[..., :2], state[..., 2:]
+    # loc_mean = torch.mean(loc, dim=(1,2,3), keepdim=True)
+    # state = torch.cat([loc - loc_mean, vel], dim=-1)
+
     if normalize:
         loc, vel = state[..., :2], state[..., 2:]
         ## Instance normalization
