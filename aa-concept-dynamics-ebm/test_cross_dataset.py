@@ -546,10 +546,26 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
     rel_send = rel_send[:1].to(dev)
     bs = feat_1.size(0)
 
-    ### SELECTED PAIRS ###
+
+    ### SELECT BY PAIRS ###
+    pair_id = 2
     pairs = get_rel_pairs(rel_send, rel_rec)
-    rw_pair = pairs[2]
-    affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
+    rw_pair = pairs[pair_id]
+    # affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
+
+    ### SELECT BY NODES ###
+    node_id = 1
+    rw_pair = range((FLAGS.n_objects - 1)*node_id, (FLAGS.n_objects - 1)*(node_id + 1))
+    # affected_nodes = torch.zeros(FLAGS.n_objects).to(dev)
+    # affected_nodes[node_id] = 1
+
+    affected_nodes = None
+
+    ### Mask definition
+    mask = torch.ones(FLAGS.components).to(dev)
+    # mask[rw_pair] = 0
+    mask = mask * 0
+    mask[rw_pair] = 1
 
     # TODO: Initialization of nodes.
     #  Currently the initialization is taken from one of the datasets
@@ -562,14 +578,6 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
         else: feat_enc = feats[mod_idx]
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latents.append(model.embed_latent(feat_enc, rel_rec, rel_send))
-
-    mask = torch.ones(FLAGS.components).to(dev)
-    # mask[rw_pair] = 0
-
-    mask = mask * 0
-    mask[rw_pair] = 1
-
-    # mask[3:] = 1
 
     latent_mix = latents[0] * mask[None, :, None] + latents[1] * (1-mask)[None, :, None]
     latent = (latent_mix, mask)
@@ -595,7 +603,7 @@ def test_manipulate(dataloaders, models, FLAGS, step=0, save = False, logger = N
                                                                             create_graph=False) # TODO: why create_graph
     else:
         feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
-                                                                           create_graph=False) # TODO: why create_graph
+                                                                           create_graph=False)
     # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
     if save:
         # print('Latent: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
