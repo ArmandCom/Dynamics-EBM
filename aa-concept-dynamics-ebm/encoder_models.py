@@ -49,7 +49,7 @@ class MLP(nn.Module):
 		x = F.elu(self.fc1(inputs)) # TODO: Switch to swish? (or only in ebm)
 		x = F.dropout(x, self.dropout_prob, training=self.training)
 		x = F.elu(self.fc2(x))
-		return x # Note: removed normalization self.batch_norm(x)
+		return x #self.batch_norm(x) #x # Note: removed normalization self.batch_norm(x)
 
 class CNN(nn.Module):
 	def __init__(self, n_in, n_hid, n_out, do_prob=0., activation = 'relu'):
