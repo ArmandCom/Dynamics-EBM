@@ -4,9 +4,9 @@ from pathlib import Path
 
 root='/data/Armand/EBM/cachedir/charged/'
 destination="/tmp"
-directory = os.path.join(root,"joint-split-onestep")
+directory = os.path.join(root,"experiments")
 os.chdir(directory)
-min_saved_iteration = 20000
+min_saved_iteration = 10000
 
 for dir in os.listdir("."):
 	found = False
