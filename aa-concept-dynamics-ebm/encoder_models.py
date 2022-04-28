@@ -341,7 +341,7 @@ class CNNMultipleLatentEncoder(nn.Module):
 		# outs = [self.layernorm(out) for out in outs]
 
 		out = out.reshape(*out.shape[:-1], self.n_latents, -1)
-		return out #self.layernorm(out)
+		return self.layernorm(out)
 
 
 class CNNEmbeddingLatentEncoder(nn.Module):
