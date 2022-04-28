@@ -22,6 +22,9 @@ from .. import __version__ as VERSION
 from .utils import center_scene, random_rotation
 from .data_load_utils import prepare_data
 
+save_data = False
+split = 'train'
+
 class Trainer(object):
     def __init__(self, model=None, criterion=None, optimizer=None, lr_scheduler=None,
                  device=None, batch_size=8, obs_length=9, pred_length=12, augment=True,
@@ -119,6 +122,9 @@ class Trainer(object):
             batch_split.append(int(scene.shape[1]))
             batch_scene_goal.append(scene_goal)
 
+            if save_data:
+                continue
+
             if ((scene_i + 1) % self.batch_size == 0) or ((scene_i + 1) == len(scenes)):
                 ## Construct Batch
                 batch_scene = np.concatenate(batch_scene, axis=1)
@@ -150,6 +156,20 @@ class Trainer(object):
                     'lr': self.get_lr(),
                     'loss': round(loss, 3),
                 })
+
+        ### Note: Save data for other models.
+        if save_data and split == 'train':
+            datadir = '/data/Armand/TrajNet/'
+            batch_scene = np.stack(batch_scene, axis=0)
+            batch_scene_goal = np.stack(batch_scene_goal, axis=0)
+            batch_split = np.cumsum(batch_split)
+            bs, T, no, _ = batch_scene.shape
+            suffix = split + '_' + scenes[0][0] + '_T' + str(T) + '_Nobj' + str(no)
+            np.save(datadir + 'scene_' + suffix + '.npy', batch_scene)
+            np.save(datadir + 'scene_goal_' + suffix + '.npy', batch_scene_goal)
+            np.save(datadir + 'split_' + suffix + '.npy', batch_split)
+            print('Train Saved.')
+            exit()
 
         self.lr_scheduler.step()
         self.log.info({
@@ -194,6 +214,9 @@ class Trainer(object):
             batch_split.append(int(scene.shape[1]))
             batch_scene_goal.append(scene_goal)
 
+            if save_data:
+                continue
+
             if ((scene_i + 1) % self.batch_size == 0) or ((scene_i + 1) == len(scenes)):
                 ## Construct Batch
                 batch_scene = np.concatenate(batch_scene, axis=1)
@@ -213,6 +236,19 @@ class Trainer(object):
                 batch_scene_goal = []
                 batch_split = [0]
 
+        ### Note: Save data for other models.
+        if save_data and split == 'val':
+            datadir = '/data/Armand/TrajNet/'
+            batch_scene = np.stack(batch_scene, axis=0)
+            batch_scene_goal = np.stack(batch_scene_goal, axis=0)
+            batch_split = np.cumsum(batch_split)
+            bs, T, no, _ = batch_scene.shape
+            suffix = split + '_' + scenes[0][0] + '_T' + str(T) + '_Nobj' + str(no)
+            np.save(datadir + 'scene_' + suffix + '.npy', batch_scene)
+            np.save(datadir + 'scene_goal_' + suffix + '.npy', batch_scene_goal)
+            np.save(datadir + 'split_' + suffix + '.npy', batch_split)
+            print('Val Saved.')
+            exit()
         eval_time = time.time() - eval_start
 
         self.log.info({
