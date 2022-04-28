@@ -238,268 +238,6 @@ def linear_annealing(device, step, start_step, end_step, start_value, end_value)
 
     return x
 
-
-class Downsample(nn.Module):
-    def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):
-        super(Downsample, self).__init__()
-        self.filt_size = filt_size
-        self.pad_off = pad_off
-        self.pad_sizes = [int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2)), int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2))]
-        self.pad_sizes = [pad_size+pad_off for pad_size in self.pad_sizes]
-        self.stride = stride
-        self.off = int((self.stride-1)/2.)
-        self.channels = channels
-
-        if self.filt_size == 1:
-            a = np.array([1., ])
-        elif self.filt_size == 2:
-            a = np.array([1., 1.])
-        elif self.filt_size == 3:
-            a = np.array([1., 2., 1.])
-        elif self.filt_size == 4:
-            a = np.array([1., 3., 3., 1.])
-        elif self.filt_size == 5:
-            a = np.array([1., 4., 6., 4., 1.])
-        elif self.filt_size == 6:
-            a = np.array([1., 5., 10., 10., 5., 1.])
-        elif self.filt_size == 7:
-            a = np.array([1., 6., 15., 20., 15., 6., 1.])
-        else:
-            raise ValueError(f'invalid filt size: {self.filt_size}')
-
-        filt = torch.Tensor(a[:, None] * a[None, :])
-        filt = filt/torch.sum(filt)
-        self.register_buffer('filt', filt[None, None, :, :].repeat((self.channels,1,1,1)))
-
-        self.pad = get_pad_layer(pad_type)(self.pad_sizes)
-
-    def forward(self, inp):
-        if self.filt_size == 1:
-            if self.pad_off == 0:
-                return inp[:, :, ::self.stride, ::self.stride]
-            else:
-                return self.pad(inp)[:, :, ::self.stride, ::self.stride]
-        else:
-            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
-
-
-def get_pad_layer(pad_type):
-    if pad_type in ['refl', 'reflect']:
-        PadLayer = nn.ReflectionPad2d
-    elif pad_type in ['repl', 'replicate']:
-        PadLayer = nn.ReplicationPad2d
-    elif pad_type == 'zero':
-        PadLayer = nn.ZeroPad2d
-    else:
-        raise ValueError('Pad type [%s] not recognized' % pad_type)
-    return PadLayer
-
-
-class Downsample1D(nn.Module):
-    def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):
-        super(Downsample1D, self).__init__()
-        self.filt_size = filt_size
-        self.pad_off = pad_off
-        self.pad_sizes = [int(1. * (filt_size - 1) / 2), int(np.ceil(1. * (filt_size - 1) / 2))]
-        self.pad_sizes = [pad_size + pad_off for pad_size in self.pad_sizes]
-        self.stride = stride
-        self.off = int((self.stride - 1) / 2.)
-        self.channels = channels
-
-        # print('Filter size [%i]' % filt_size)
-        if self.filt_size == 1:
-            a = np.array([1., ])
-        elif self.filt_size == 2:
-            a = np.array([1., 1.])
-        elif self.filt_size == 3:
-            a = np.array([1., 2., 1.])
-        elif self.filt_size == 4:
-            a = np.array([1., 3., 3., 1.])
-        elif self.filt_size == 5:
-            a = np.array([1., 4., 6., 4., 1.])
-        elif self.filt_size == 6:
-            a = np.array([1., 5., 10., 10., 5., 1.])
-        elif self.filt_size == 7:
-            a = np.array([1., 6., 15., 20., 15., 6., 1.])
-        else:
-            raise ValueError(f'invalid filt size: {self.filt_size}')
-
-        filt = torch.Tensor(a)
-        filt = filt / torch.sum(filt)
-        self.register_buffer('filt', filt[None, None, :].repeat((self.channels, 1, 1)))
-
-        self.pad = get_pad_layer_1d(pad_type)(self.pad_sizes)
-
-    def forward(self, inp):
-        if self.filt_size == 1:
-            if self.pad_off == 0:
-                return inp[:, :, ::self.stride]
-            else:
-                return self.pad(inp)[:, :, ::self.stride]
-        else:
-            return F.conv1d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
-
-
-def get_pad_layer_1d(pad_type):
-    if pad_type in ['refl', 'reflect']:
-        PadLayer = nn.ReflectionPad1d
-    elif pad_type in ['repl', 'replicate']:
-        PadLayer = nn.ReplicationPad1d
-    elif pad_type == 'zero':
-        PadLayer = nn.ZeroPad1d
-    else:
-        raise ValueError('Pad type [%s] not recognized' % pad_type)
-    return PadLayer
-
-
-class Self_Attn(nn.Module):
-    """ Self attention Layer"""
-    def __init__(self,in_dim,activation):
-        super(Self_Attn,self).__init__()
-        self.chanel_in = in_dim
-        self.activation = activation
-
-        self.query_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
-        self.key_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
-        self.value_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim , kernel_size= 1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-
-        self.softmax  = nn.Softmax(dim=-1) #
-
-    def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B X C X W X H)
-            returns :
-                out : self attention value + input feature
-                attention: B X N X N (N is Width*Height)
-        """
-        m_batchsize,C,width ,height = x.size()
-        proj_query  = self.query_conv(x).view(m_batchsize,-1,width*height).permute(0,2,1) # B X CX(N)
-        proj_key =  self.key_conv(x).view(m_batchsize,-1,width*height) # B X C x (*W*H)
-        energy =  torch.bmm(proj_query,proj_key) # transpose check
-        attention = self.softmax(energy) # BX (N) X (N)
-        proj_value = self.value_conv(x).view(m_batchsize,-1,width*height) # B X C X N
-
-        out = torch.bmm(proj_value,attention.permute(0,2,1) )
-        out = out.view(m_batchsize,C,width,height)
-
-        out = self.gamma*out + x
-        return out,attention
-
-
-class CondResBlock(nn.Module):
-    def __init__(self, args, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, classes=512, norm=True, spec_norm=False, no_res=False):
-        super(CondResBlock, self).__init__()
-
-        self.filters = filters
-        self.latent_dim = latent_dim
-        self.im_size = im_size
-        self.downsample = downsample
-        self.no_res = no_res
-
-        if filters <= 128:
-            # self.bn1 = nn.InstanceNorm2d(filters, affine=True)
-            self.bn1 = nn.GroupNorm(int(filters / 128 * 32), filters, affine=True)
-        else:
-            self.bn1 = nn.GroupNorm(32, filters)
-
-        if not norm:
-            self.bn1 = None
-
-        self.args = args
-
-        if spec_norm:
-            self.conv1 = spectral_norm(nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1))
-        else:
-            self.conv1 = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
-
-        if filters <= 128:
-            self.bn2 = nn.GroupNorm(int(filters / 128 * 32), filters, affine=True)
-        else:
-            self.bn2 = nn.GroupNorm(32, filters, affine=True)
-
-        if not norm:
-            self.bn2 = None
-
-        if spec_norm:
-            self.conv2 = spectral_norm(nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1))
-        else:
-            self.conv2 = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
-
-        self.dropout = nn.Dropout(0.2)
-
-        # Upscale to an mask of image
-        self.latent_map = nn.Linear(classes, 2*filters)
-        self.latent_map_2 = nn.Linear(classes, 2*filters)
-
-        self.relu = torch.nn.ReLU(inplace=True)
-        self.act = swish
-
-        # Upscale to mask of image
-        if downsample:
-            if rescale:
-                self.conv_downsample = nn.Conv2d(filters, 2 * filters, kernel_size=3, stride=1, padding=1)
-
-                if args.alias:
-                    self.avg_pool = Downsample(channels=2*filters)
-                else:
-                    self.avg_pool = nn.AvgPool2d(3, stride=2, padding=1)
-            else:
-                self.conv_downsample = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
-
-                if args.alias:
-                    self.avg_pool = Downsample(channels=filters)
-                else:
-                    self.avg_pool = nn.AvgPool2d(3, stride=2, padding=1)
-
-    def forward(self, x, y):
-        x_orig = x
-
-        if y is not None:
-            latent_map = self.latent_map(y).view(-1, 2*self.filters, 1, 1)
-
-            gain = latent_map[:, :self.filters]
-            bias = latent_map[:, self.filters:]
-
-        x = self.conv1(x)
-
-        if self.bn1 is not None:
-            x = self.bn1(x)
-
-        if y is not None:
-            x = gain * x + bias
-
-        x = self.act(x)
-        # x = self.dropout(x)
-
-        if y is not None:
-            latent_map = self.latent_map_2(y).view(-1, 2*self.filters, 1, 1)
-            gain = latent_map[:, :self.filters]
-            bias = latent_map[:, self.filters:]
-
-        x = self.conv2(x)
-
-        if self.bn2 is not None:
-            x = self.bn2(x)
-
-        if y is not None:
-            x = gain * x + bias
-
-        x = self.act(x)
-
-        if not self.no_res:
-            x_out = x_orig + x
-        else:
-            x_out = x
-
-        if self.downsample:
-            x_out = self.conv_downsample(x_out)
-            x_out = self.act(self.avg_pool(x_out))
-
-        return x_out
-
-
 class GaussianBlur(object):
     def __init__(self, min=0.1, max=2.0, kernel_size=9):
         self.min = min
@@ -643,11 +381,13 @@ def rotate_with_vel(points, angle):
     locpol = torch.polar(locs.abs(), locs.angle() + angle)
     locs = torch.view_as_real(locpol)
 
-    vels = torch.view_as_complex(points[..., 2:])
-    velpol = torch.polar(vels.abs(), vels.angle() + angle)
-    vels = torch.view_as_real(velpol)
-
-    return torch.cat([locs, vels], dim=-1)
+    if points.shape[-1] > 2:
+        vels = torch.view_as_complex(points[..., 2:])
+        velpol = torch.polar(vels.abs(), vels.angle() + angle)
+        vels = torch.view_as_real(velpol)
+        feat = torch.cat([locs, vels], dim=-1)
+    else: feat = locs
+    return feat
 
 def normalize_trajectories(state, augment=False, normalize=True):
     '''
@@ -666,8 +406,8 @@ def normalize_trajectories(state, augment=False, normalize=True):
         ## Instance normalization
         loc_max = torch.amax(loc, dim=(1,2,3), keepdim=True)
         loc_min = torch.amin(loc, dim=(1,2,3), keepdim=True)
-        vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
-        vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
+        # vel_max = torch.amax(vel, dim=(1,2,3), keepdim=True)
+        # vel_min = torch.amin(vel, dim=(1,2,3), keepdim=True)
 
         ## Batch normalization
         # loc_max = loc.max()
@@ -677,9 +417,11 @@ def normalize_trajectories(state, augment=False, normalize=True):
 
         # Normalize to [-1, 1]
         loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-        vel = vel * 2 / (loc_max - loc_min)
 
-        state = torch.cat([loc, vel], dim=-1)
+        if state.shape[-1] > 2:
+            vel = vel * 2 / (loc_max - loc_min)
+            state = torch.cat([loc, vel], dim=-1)
+        else: state = loc
     return state
 
 def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None):
@@ -691,7 +433,7 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
         axes.set_ylim([lims[0], lims[1]])
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
-    vel_norm = np.sqrt((vel ** 2).sum(axis=1))
+    # vel_norm = np.sqrt((vel ** 2).sum(axis=1))
 
     if highlight_nodes is not None:
         modes = ['-' if node == 0 else '--' for node in highlight_nodes]
@@ -738,3 +480,303 @@ def get_rel_pairs(rel_send, rel_rec):
         group_list.append(this_group)
     return group_list
 
+def save_rel_matrices(model, rel_rec, rel_send):
+    if model.rel_rec is None and model.rel_send is None:
+        model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
+
+def gaussian_fn(M, std):
+    n = torch.arange(0, M) - (M - 1.0) / 2.0
+    sig2 = 2 * std * std
+    w = torch.exp(-n ** 2 / sig2)
+    return (w/w.sum())#.double()
+
+gkern = None
+def smooth_trajectory(x, kernel_size, std, interp_size = 100):
+
+    x = x.permute(0,1,3,2)
+    traj_shape = x.shape
+    x = x.flatten(0,2)
+    x_in = F.interpolate(x[:, None, :], interp_size, mode='linear')
+    global gkern
+    if gkern is None:
+        gkern = gaussian_fn(kernel_size, std).to(x_in.device)
+    x_in_sm = F.conv1d(x_in, weight=gkern[None, None], padding=kernel_size//2) # padding? double?
+    x_sm = F.interpolate(x_in_sm, traj_shape[-1], mode='linear')
+
+    # visualize
+    # import matplotlib.pyplot as plt
+    # plt.close();plt.plot(x_sm[0,0].cpu().detach().numpy());plt.plot(x[0].cpu().detach().numpy()); plt.show()
+    return x_sm.reshape(traj_shape).permute(0,1,3,2)
+
+def get_model_grad_norm(models):
+    parameters = [p for p in models[0].parameters() if p.grad is not None and p.requires_grad]
+    if len(parameters) == 0:
+        total_norm = 0.0
+    else:
+        device = parameters[0].grad.device
+        total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()).to(device) for p in parameters]), 2.0).item()
+    return total_norm
+
+def get_model_grad_max(models):
+    parameters = [abs(p.grad.detach()).max() for p in models[0].parameters() if p.grad is not None and p.requires_grad]
+    return max(parameters)
+
+# class Downsample(nn.Module):
+#     def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):
+#         super(Downsample, self).__init__()
+#         self.filt_size = filt_size
+#         self.pad_off = pad_off
+#         self.pad_sizes = [int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2)), int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2))]
+#         self.pad_sizes = [pad_size+pad_off for pad_size in self.pad_sizes]
+#         self.stride = stride
+#         self.off = int((self.stride-1)/2.)
+#         self.channels = channels
+#
+#         if self.filt_size == 1:
+#             a = np.array([1., ])
+#         elif self.filt_size == 2:
+#             a = np.array([1., 1.])
+#         elif self.filt_size == 3:
+#             a = np.array([1., 2., 1.])
+#         elif self.filt_size == 4:
+#             a = np.array([1., 3., 3., 1.])
+#         elif self.filt_size == 5:
+#             a = np.array([1., 4., 6., 4., 1.])
+#         elif self.filt_size == 6:
+#             a = np.array([1., 5., 10., 10., 5., 1.])
+#         elif self.filt_size == 7:
+#             a = np.array([1., 6., 15., 20., 15., 6., 1.])
+#         else:
+#             raise ValueError(f'invalid filt size: {self.filt_size}')
+#
+#         filt = torch.Tensor(a[:, None] * a[None, :])
+#         filt = filt/torch.sum(filt)
+#         self.register_buffer('filt', filt[None, None, :, :].repeat((self.channels,1,1,1)))
+#
+#         self.pad = get_pad_layer(pad_type)(self.pad_sizes)
+#
+#     def forward(self, inp):
+#         if self.filt_size == 1:
+#             if self.pad_off == 0:
+#                 return inp[:, :, ::self.stride, ::self.stride]
+#             else:
+#                 return self.pad(inp)[:, :, ::self.stride, ::self.stride]
+#         else:
+#             return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+#
+#
+# def get_pad_layer(pad_type):
+#     if pad_type in ['refl', 'reflect']:
+#         PadLayer = nn.ReflectionPad2d
+#     elif pad_type in ['repl', 'replicate']:
+#         PadLayer = nn.ReplicationPad2d
+#     elif pad_type == 'zero':
+#         PadLayer = nn.ZeroPad2d
+#     else:
+#         raise ValueError('Pad type [%s] not recognized' % pad_type)
+#     return PadLayer
+#
+#
+# class Downsample1D(nn.Module):
+#     def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):
+#         super(Downsample1D, self).__init__()
+#         self.filt_size = filt_size
+#         self.pad_off = pad_off
+#         self.pad_sizes = [int(1. * (filt_size - 1) / 2), int(np.ceil(1. * (filt_size - 1) / 2))]
+#         self.pad_sizes = [pad_size + pad_off for pad_size in self.pad_sizes]
+#         self.stride = stride
+#         self.off = int((self.stride - 1) / 2.)
+#         self.channels = channels
+#
+#         # print('Filter size [%i]' % filt_size)
+#         if self.filt_size == 1:
+#             a = np.array([1., ])
+#         elif self.filt_size == 2:
+#             a = np.array([1., 1.])
+#         elif self.filt_size == 3:
+#             a = np.array([1., 2., 1.])
+#         elif self.filt_size == 4:
+#             a = np.array([1., 3., 3., 1.])
+#         elif self.filt_size == 5:
+#             a = np.array([1., 4., 6., 4., 1.])
+#         elif self.filt_size == 6:
+#             a = np.array([1., 5., 10., 10., 5., 1.])
+#         elif self.filt_size == 7:
+#             a = np.array([1., 6., 15., 20., 15., 6., 1.])
+#         else:
+#             raise ValueError(f'invalid filt size: {self.filt_size}')
+#
+#         filt = torch.Tensor(a)
+#         filt = filt / torch.sum(filt)
+#         self.register_buffer('filt', filt[None, None, :].repeat((self.channels, 1, 1)))
+#
+#         self.pad = get_pad_layer_1d(pad_type)(self.pad_sizes)
+#
+#     def forward(self, inp):
+#         if self.filt_size == 1:
+#             if self.pad_off == 0:
+#                 return inp[:, :, ::self.stride]
+#             else:
+#                 return self.pad(inp)[:, :, ::self.stride]
+#         else:
+#             return F.conv1d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+#
+#
+# def get_pad_layer_1d(pad_type):
+#     if pad_type in ['refl', 'reflect']:
+#         PadLayer = nn.ReflectionPad1d
+#     elif pad_type in ['repl', 'replicate']:
+#         PadLayer = nn.ReplicationPad1d
+#     elif pad_type == 'zero':
+#         PadLayer = nn.ZeroPad1d
+#     else:
+#         raise ValueError('Pad type [%s] not recognized' % pad_type)
+#     return PadLayer
+#
+#
+# class Self_Attn(nn.Module):
+#     """ Self attention Layer"""
+#     def __init__(self,in_dim,activation):
+#         super(Self_Attn,self).__init__()
+#         self.chanel_in = in_dim
+#         self.activation = activation
+#
+#         self.query_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+#         self.key_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+#         self.value_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim , kernel_size= 1)
+#         self.gamma = nn.Parameter(torch.zeros(1))
+#
+#         self.softmax  = nn.Softmax(dim=-1) #
+#
+#     def forward(self,x):
+#         """
+#             inputs :
+#                 x : input feature maps( B X C X W X H)
+#             returns :
+#                 out : self attention value + input feature
+#                 attention: B X N X N (N is Width*Height)
+#         """
+#         m_batchsize,C,width ,height = x.size()
+#         proj_query  = self.query_conv(x).view(m_batchsize,-1,width*height).permute(0,2,1) # B X CX(N)
+#         proj_key =  self.key_conv(x).view(m_batchsize,-1,width*height) # B X C x (*W*H)
+#         energy =  torch.bmm(proj_query,proj_key) # transpose check
+#         attention = self.softmax(energy) # BX (N) X (N)
+#         proj_value = self.value_conv(x).view(m_batchsize,-1,width*height) # B X C X N
+#
+#         out = torch.bmm(proj_value,attention.permute(0,2,1) )
+#         out = out.view(m_batchsize,C,width,height)
+#
+#         out = self.gamma*out + x
+#         return out,attention
+#
+#
+# class CondResBlock(nn.Module):
+#     def __init__(self, args, downsample=True, rescale=True, filters=64, latent_dim=64, im_size=64, classes=512, norm=True, spec_norm=False, no_res=False):
+#         super(CondResBlock, self).__init__()
+#
+#         self.filters = filters
+#         self.latent_dim = latent_dim
+#         self.im_size = im_size
+#         self.downsample = downsample
+#         self.no_res = no_res
+#
+#         if filters <= 128:
+#             # self.bn1 = nn.InstanceNorm2d(filters, affine=True)
+#             self.bn1 = nn.GroupNorm(int(filters / 128 * 32), filters, affine=True)
+#         else:
+#             self.bn1 = nn.GroupNorm(32, filters)
+#
+#         if not norm:
+#             self.bn1 = None
+#
+#         self.args = args
+#
+#         if spec_norm:
+#             self.conv1 = spectral_norm(nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1))
+#         else:
+#             self.conv1 = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
+#
+#         if filters <= 128:
+#             self.bn2 = nn.GroupNorm(int(filters / 128 * 32), filters, affine=True)
+#         else:
+#             self.bn2 = nn.GroupNorm(32, filters, affine=True)
+#
+#         if not norm:
+#             self.bn2 = None
+#
+#         if spec_norm:
+#             self.conv2 = spectral_norm(nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1))
+#         else:
+#             self.conv2 = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
+#
+#         self.dropout = nn.Dropout(0.2)
+#
+#         # Upscale to an mask of image
+#         self.latent_map = nn.Linear(classes, 2*filters)
+#         self.latent_map_2 = nn.Linear(classes, 2*filters)
+#
+#         self.relu = torch.nn.ReLU(inplace=True)
+#         self.act = swish
+#
+#         # Upscale to mask of image
+#         if downsample:
+#             if rescale:
+#                 self.conv_downsample = nn.Conv2d(filters, 2 * filters, kernel_size=3, stride=1, padding=1)
+#
+#                 if args.alias:
+#                     self.avg_pool = Downsample(channels=2*filters)
+#                 else:
+#                     self.avg_pool = nn.AvgPool2d(3, stride=2, padding=1)
+#             else:
+#                 self.conv_downsample = nn.Conv2d(filters, filters, kernel_size=3, stride=1, padding=1)
+#
+#                 if args.alias:
+#                     self.avg_pool = Downsample(channels=filters)
+#                 else:
+#                     self.avg_pool = nn.AvgPool2d(3, stride=2, padding=1)
+#
+#     def forward(self, x, y):
+#         x_orig = x
+#
+#         if y is not None:
+#             latent_map = self.latent_map(y).view(-1, 2*self.filters, 1, 1)
+#
+#             gain = latent_map[:, :self.filters]
+#             bias = latent_map[:, self.filters:]
+#
+#         x = self.conv1(x)
+#
+#         if self.bn1 is not None:
+#             x = self.bn1(x)
+#
+#         if y is not None:
+#             x = gain * x + bias
+#
+#         x = self.act(x)
+#         # x = self.dropout(x)
+#
+#         if y is not None:
+#             latent_map = self.latent_map_2(y).view(-1, 2*self.filters, 1, 1)
+#             gain = latent_map[:, :self.filters]
+#             bias = latent_map[:, self.filters:]
+#
+#         x = self.conv2(x)
+#
+#         if self.bn2 is not None:
+#             x = self.bn2(x)
+#
+#         if y is not None:
+#             x = gain * x + bias
+#
+#         x = self.act(x)
+#
+#         if not self.no_res:
+#             x_out = x_orig + x
+#         else:
+#             x_out = x
+#
+#         if self.downsample:
+#             x_out = self.conv_downsample(x_out)
+#             x_out = self.act(self.avg_pool(x_out))
+#
+#         return x_out
