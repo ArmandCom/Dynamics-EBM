@@ -5,47 +5,26 @@ from scipy.linalg import toeplitz
 import numpy as np
 import torch.nn.functional as F
 import os
+import shutil
+import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-from dataset import ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles, TrajectoryDataset
-from models import EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_LateFusion, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from dataset import TrajnetDataset, ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles
+from models import NodeGraphEBM_CNNOneStep_2Streams, EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_CNNOneStep_Light, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep, NodeGraphEBM_CNN# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
-# from easydict import EasyDict
 import os.path as osp
-import math
-# from torch.nn.utils import clip_grad_norm
-# import numpy as np
-# from imageio import imwrite
-# import cv2
 import argparse
-# import pdb
-# from torchvision.datasets import ImageFolder
-# import torchvision.transforms as transforms
-# import torch.nn as nn
-# import torch.optim as optim
-# from torch.nn.parallel.distributed import DistributedDataParallel as DDP
-import random
-# from torchvision.utils import make_grid
-# from imageio import get_writer
 from third_party.utils import visualize_trajectories, get_trajectory_figure, \
     linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
     normalize_trajectories, augment_trajectories, MMD, align_replayed_batch, get_rel_pairs
-from pathlib import Path
+from third_party.utils import create_masks, save_rel_matrices, smooth_trajectory, get_model_grad_norm, get_model_grad_max
 
-# --exp=springs --num_steps=19 --step_lr=30.0 --dataset=springs --cuda --train --batch_size=24 --latent_dim=8 --pos_embed --data_workers=0 --gpus=1 --node_rank=1
-# python train.py --exp=charged --num_steps=2 --num_steps_test 50 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=64 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode
-# python train.py --exp=charged --num_steps=4 --num_steps_test 20 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=60 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 1 --autoencode --normalize_data_latent --logname beta.5_randrotation --forecast --num_fixed_timesteps 10
-# python train.py --exp=charged --num_steps=2 --num_steps_test 4 --step_lr=10.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=16 --data_workers=4 --gpus=1 --gpu_rank 0 --autoencode --normalize_data_latent --logname randrotation_test_objid_smoothin0 --num_fixed_timesteps 5 --obj_id_embedding --independent_energies
-#  python train.py --exp=charged --num_steps=60 --num_steps_test 60 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --data_workers=4 --gpus=1 --gpu_rank 0 --normalize_data_latent --num_fixed_timesteps 1 --obj_id_embedding --spectral_norm --resume_iter 102000 --resume_name joint/NO3_BS24_S-LR10.0_NS25_LR0.0003_LDim32_KL0_SM0_SN1_Mom0.0_EMA0_RB0_AE0_FC0_CDAE0_OID1_MMD0_FE0_NDL1_SeqL19_FSeqL1
-
-#  python train.py --exp=charged --num_steps 10 --num_steps_test 200 --step_lr=5.0 --dataset=charged --cuda --train --batch_size=24 --latent_dim=32 --autoencode --data_workers=4 --gpus=1 --normalize_data_latent --num_fixed_timesteps 1 --logname two_resolutions --gpu_rank 0 --factor
 homedir = '/data/Armand/EBM/'
 # port = 6021
-sample_diff = False
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -58,9 +37,10 @@ parser.add_argument('--single', action='store_true', help='test overfitting of t
 
 
 parser.add_argument('--dataset', default='charged', type=str, help='Dataset to use (intphys or others or imagenet or cubes)')
+parser.add_argument('--ori_dataset', default='charged', type=str, help='Dataset to use (intphys or others or imagenet or cubes)')
 parser.add_argument('--logdir', default='/data/Armand/EBM/cachedir', type=str, help='location where log of experiments will be stored')
 parser.add_argument('--logname', default='', type=str, help='name of logs')
-parser.add_argument('--exp', default='default', type=str, help='name of experiments')
+parser.add_argument('--exp', default='', type=str, help='name of experiments')
 
 # arguments for NRI springs/charged dataset
 parser.add_argument('--n_objects', default=3, type=int, help='Dataset to use (intphys or others or imagenet or cubes)')
@@ -87,7 +67,10 @@ parser.add_argument('--cd_mode', default='', type=str, help='chooses between opt
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
-parser.add_argument('--ensembles', default=1, type=int, help='use an ensemble of models')
+parser.add_argument('--ensembles', default=2, type=int, help='use an ensemble of models')
+parser.add_argument('--trained_models', default=4, type=int, help='use an ensemble of models')
+parser.add_argument('--model_name', default='CNNOS_Node', type=str, help='model name')
+parser.add_argument('--masking_type', default='by_receiver', type=str, help='type of masking in training')
 
 # EBM specific settings
 
@@ -135,7 +118,7 @@ parser.add_argument('--step_lr', default=500.0, type=float, help='step size of l
 parser.add_argument('--step_lr_decay_factor', default=1.0, type=float, help='step size of latents')
 parser.add_argument('--noise_coef', default=0.0, type=float, help='step size of latents')
 parser.add_argument('--noise_decay_factor', default=1.0, type=float, help='step size of latents')
-parser.add_argument('--ns_iteration_end', default=200000, type=int, help='training iteration where the number of sampling steps reach their max.')
+parser.add_argument('--ns_iteration_end', default=300000, type=int, help='training iteration where the number of sampling steps reach their max.')
 parser.add_argument('--num_steps_end', default=-1, type=int, help='number of sampling steps')
 
 parser.add_argument('--sample', action='store_true', help='generate negative samples through Langevin')
@@ -147,97 +130,45 @@ parser.add_argument('--gpus', default=1, type=int, help='number of gpus per node
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
 parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
 
+# python train.py --num_steps=3 --num_steps_test 5 --step_lr=10.0 --dataset=trajnet_orca_five_synth --cuda --train --batch_size=24 --latent_dim=8 --data_workers=4 --gpus=1 --gpu_rank 1 --normalize_data_latent --num_fixed_timesteps 1 --autoencode --logname cnnosNodek3 --n_objects 5 --factor --num_timesteps 21 --spectral_norm --input_dim 2
+
 def init_model(FLAGS, device, dataset):
-    # modelname = EdgeGraphEBM_LateFusion
-    modelname = EdgeGraphEBM_CNNOneStep
-    # modelname = NodeGraphEBM_CNNOneStep
-    # modelname = EdgeGraphEBM_OneStep
-    # modelname = EdgeGraphEBM_CNN_OS_noF
-    models = [modelname(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
+
+    if FLAGS.model_name == 'CNNOS_Edge':
+        modelname = EdgeGraphEBM_CNNOneStep
+    elif FLAGS.model_name == 'CNNOS_Edge_Light':
+        modelname = EdgeGraphEBM_CNNOneStep_Light
+    elif FLAGS.model_name == 'CNNOS_Node_Light':
+        modelname = NodeGraphEBM_CNNOneStep
+    elif FLAGS.model_name == 'CNNOS_Node':
+        modelname = NodeGraphEBM_CNN
+    elif FLAGS.model_name == 'CNNOS_Edge_noFactor':
+        modelname = EdgeGraphEBM_CNN_OS_noF
+    elif FLAGS.model_name == 'OS_Edge':
+        modelname = EdgeGraphEBM_OneStep
+    elif FLAGS.model_name == 'CNNOS_Node_2S':
+        modelname = NodeGraphEBM_CNNOneStep_2Streams
+    else: raise NotImplementedError
+
+    n_models = FLAGS.ensembles
+    FLAGS.ensembles = FLAGS.trained_models
+
+    # Option 1: All same model
+    model = modelname(FLAGS, dataset).to(device)
+    models = [model for i in range(FLAGS.ensembles)]
+
+    # Option 2: All different models
+    # models = [modelname(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
+
+    # Option 3: Same model per complementary masks, different across latents
+    # models = []
+    # [models.extend([modelname(FLAGS, dataset).to(device)]*2)for i in range(FLAGS.ensembles//2)]
+
+    FLAGS.ensembles = n_models
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
-    # TODO: for different learning rates change here.
     return models, optimizers
 
-
-def kl_categorical(preds, log_prior, num_atoms, eps=1e-16):
-    """Based on https://github.com/ethanfetaya/NRI (MIT License)."""
-    # kl_div = preds * (torch.log(preds + eps) - log_prior[0][0][0]) + (1-preds) * (torch.log(1-preds + eps) - log_prior[0][0][1] )
-    kl_div = preds * (torch.log(preds + eps) - log_prior) #log_prior.permute(0,2,1))
-    return kl_div.sum() / (num_atoms * preds.size(0))
-
-def kl_categorical_uniform(
-        preds, num_atoms, num_edge_types, add_const=False, eps=1e-16
-):
-    """Based on https://github.com/ethanfetaya/NRI (MIT License)."""
-    kl_div = preds * (torch.log(preds + eps))
-    if add_const:
-        const = np.log(num_edge_types)
-        kl_div += const
-    return kl_div.sum() / (num_atoms * preds.size(0))
-
-# log_prior = torch.FloatTensor(np.log(prior))
-# log_prior = log_prior.unsqueeze(0).unsqueeze(0)
-# if args.cuda:
-#     log_prior = log_prior.cuda()
-
-def save_rel_matrices(model, rel_rec, rel_send):
-    if model.rel_rec is None and model.rel_send is None:
-        model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
-
-def gaussian_fn(M, std):
-    n = torch.arange(0, M) - (M - 1.0) / 2.0
-    sig2 = 2 * std * std
-    w = torch.exp(-n ** 2 / sig2)
-    return (w/w.sum())#.double()
-
-gkern = None
-def smooth_trajectory(x, kernel_size, std, interp_size = 100):
-
-    x = x.permute(0,1,3,2)
-    traj_shape = x.shape
-    x = x.flatten(0,2)
-    x_in = F.interpolate(x[:, None, :], interp_size, mode='linear')
-    global gkern
-    if gkern is None:
-        gkern = gaussian_fn(kernel_size, std).to(x_in.device)
-    x_in_sm = F.conv1d(x_in, weight=gkern[None, None], padding=kernel_size//2) # padding? double?
-    x_sm = F.interpolate(x_in_sm, traj_shape[-1], mode='linear')
-
-    # visualize
-    # import matplotlib.pyplot as plt
-    # plt.close();plt.plot(x_sm[0,0].cpu().detach().numpy());plt.plot(x[0].cpu().detach().numpy()); plt.show()
-    return x_sm.reshape(traj_shape).permute(0,1,3,2)
-
-def ema_model(models, models_ema, mu=0.99):
-    for model, model_ema in zip(models, models_ema):
-        for param, param_ema in zip(model.parameters(), model_ema.parameters()):
-            param_ema.data = mu * param_ema.data + (1 - mu) * param.data
-
-def get_model_grad_norm(models):
-    parameters = [p for p in models[0].parameters() if p.grad is not None and p.requires_grad]
-    if len(parameters) == 0:
-        total_norm = 0.0
-    else:
-        device = parameters[0].grad.device
-        total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()).to(device) for p in parameters]), 2.0).item()
-    return total_norm
-
-def get_model_grad_max(models):
-    parameters = [abs(p.grad.detach()).max() for p in models[0].parameters() if p.grad is not None and p.requires_grad]
-    return max(parameters)
-
-def average_gradients(models):
-    size = float(dist.get_world_size())
-
-    for model in models:
-        for name, param in model.named_parameters():
-            if param.grad is None:
-                continue
-
-            dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
-            param.grad.data /= size
-
-def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0):
+def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0, fixed_mask=None):
     feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
@@ -266,19 +197,21 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
     # Num steps linear annealing
     if not sample:
         if FLAGS.num_steps_end != -1 and training_step > 0:
-            num_steps = int(linear_annealing(None, training_step, start_step=100000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
+            num_steps = int(linear_annealing(None, training_step, start_step=20000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
 
-    fixed_mask = torch.zeros_like(feat_neg)
-    fixed_mask[:, :, 0] = 1
-    if FLAGS.num_fixed_timesteps > 0:
-        #         feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
-        #                               feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
-        indices = torch.randint(feat_neg.shape[2]-num_fixed_timesteps+1,
-                              (feat_neg.shape[0],))
-        for fixed_id in range(num_fixed_timesteps):
-            indices += fixed_id
-            fixed_mask[torch.arange(0,feat_neg.shape[0]), :, indices, :] = 1
-            feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
+    if fixed_mask is None:
+        fixed_mask = torch.zeros_like(feat_neg)
+        if FLAGS.num_fixed_timesteps > 0:
+            fixed_mask[:, :, :num_fixed_timesteps] = 1
+            # #        feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
+            # #                              feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
+            # indices = torch.randint(feat_neg.shape[2]-num_fixed_timesteps+1,
+            #                       (feat_neg.shape[0],))
+            # for fixed_id in range(num_fixed_timesteps):
+            #     indices += fixed_id
+            #     fixed_mask[torch.arange(0,feat_neg.shape[0]), :, indices, :] = 1
+            #     feat_fixed[torch.arange(0,feat_neg.shape[0]), :, indices, :2] += 0.01
+            #     feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
 
     feat_neg_kl = None
 
@@ -301,37 +234,25 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         latent_ii, mask = latent
         energy = 0
         curr_latent = latent
+
+        # Trained models
         for ii in range(2):
-            for iii in range(len(models)//2):
+            for iii in range(FLAGS.trained_models//2):
                 if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
                 else:           curr_latent = (latent_ii[..., iii, :],     mask)
-                if FLAGS.sample_ema:
-                    energy = models_ema[ii*2 + iii].forward(feat_neg, curr_latent) + energy
-                else:
-                    energy = models[ii*2 + iii].forward(feat_neg, curr_latent) + energy
+                # print('-' ,iii)
+                # print(ii + 2*iii)
+                energy = models[ii + 2*iii].forward(feat_neg, curr_latent) + energy
+        # New models
+        for ii in range(2):
+            for iii in range(FLAGS.trained_models//2,
+                             FLAGS.ensembles//2):
+                if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+                else:           curr_latent = (latent_ii[..., iii, :],     mask)
+                energy = models[ii + + 2*iii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
-        feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
-        #### FEATURE TEST #####
-        # clamp_val, feat_grad_norm = .8, feat_grad.norm()
-        # if feat_grad_norm > clamp_val:
-        #     feat_grad = clamp_val * feat_grad / feat_grad_norm
-        #### FEATURE TEST #####
-
-        #### FEATURE TEST #####
-        # Gradient Dropout - Note: Testing.
-        # update_mask = (torch.rand(feat_grad.shape, device=feat_grad.device) > 0.2)
-        # feat_grad = feat_grad * update_mask
-        #### FEATURE TEST #####
-
-        # KL Term computation ### From Compose visual relations ###
-        if i == num_steps - 1 and not sample and FLAGS.kl:
-            feat_neg_kl = feat_neg
-            rand_idx = torch.randint(len(models), (1,))
-            energy = models[rand_idx].forward(feat_neg_kl, latent)
-            feat_grad_kl, = torch.autograd.grad([energy.sum()], [feat_neg_kl], create_graph=create_graph)  # Create_graph true?
-            feat_neg_kl = feat_neg_kl - step_lr * feat_grad_kl #[:FLAGS.batch_size]
-            feat_neg_kl = torch.clamp(feat_neg_kl, -1, 1)
+        # feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
 
         ## Momentum update
         if FLAGS.momentum > 0:
@@ -341,17 +262,15 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         else:
             feat_neg = feat_neg * (1-fixed_mask) - FLAGS.step_lr * feat_grad * (1-fixed_mask) # GD computation
 
-
         if num_fixed_timesteps > 0:
             feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
 
-        # latents = latents
-        feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: Clamp again for normalized
+        feat_neg = torch.clamp(feat_neg, -1, 1)
         feat_negs.append(feat_neg)
         feat_neg = feat_neg.detach()
         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
-    return feat_neg, feat_negs, feat_neg_kl, feat_grad
+    return feat_neg, feat_negs, energy, feat_grad
 
 def sync_model(models): # Q: What is this about?
     size = float(dist.get_world_size())
@@ -373,15 +292,43 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
+        nonan_mask = feat == feat
+        feat[torch.logical_not(nonan_mask)] = 10
         edges = edges.to(dev)
         rel_rec = rel_rec.to(dev)
         rel_send = rel_send.to(dev)
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
+        # [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
-        b_idx = 5
-        b_idx_ref = 12
+        b_idx = 12
+        b_idx_ref = 10
 
+
+        rw_pair = None
+        affected_nodes = None
+
+        ### SELECT BY PAIRS ###
+        # pair_id = 2
+        # pairs = get_rel_pairs(rel_send, rel_rec)
+        # rw_pair = pairs[pair_id]
+        # affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
+
+        ### SELECT BY NODES ###
+        # node_id = 1
+        # rw_pair = range((FLAGS.n_objects - 1)*node_id, (FLAGS.n_objects - 1)*(node_id + 1))
+        # affected_nodes = torch.zeros(FLAGS.n_objects).to(dev)
+        # affected_nodes[node_id] = 1
+
+        ### Switch examples ###
+        rw_pair = torch.arange(FLAGS.components).to(dev)
+
+        ### Mask definition
+        mask = torch.ones(FLAGS.components).to(dev)
+        if rw_pair is not None:
+            mask[rw_pair] = 0
+        # mask = mask * 0
+        # mask[rw_pair] = 1
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
@@ -390,90 +337,93 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         if isinstance(latent, tuple):
             latent, weights = latent
 
-        pairs = get_rel_pairs(rel_send, rel_rec)
-        rw_pair = pairs[0]
-        affected_nodes = (rel_rec + rel_send)[0, rw_pair].mean(0).clamp_(min=0, max=1).data.cpu().numpy()
-
         ### NOTE: TEST: Random rotation of the input trajectory
-        # feat = torch.cat(augment_trajectories((feat[..., :2], feat[..., 2:]), rotation='random'), dim=-1)
-        # feat = normalize_trajectories(feat)
+        # feat = normalize_trajectories(feat, augment=False, normalize=True) # We max min normalize the batch
+
+        # fixed_idx = 2
+        # feat[:, fixed_idx:fixed_idx+1, :, :] = feat[:, fixed_idx:fixed_idx+1, :1, :]
+        # fixed_mask = torch.zeros_like(feat)
+        # if FLAGS.num_fixed_timesteps > 0:
+        #     fixed_mask[:, :, :FLAGS.num_fixed_timesteps] = 1
+        #     fixed_mask[:, fixed_idx:fixed_idx+1, :, :] = 1
 
 
-        mask = torch.ones(FLAGS.components).to(dev)
-        mask[rw_pair] = 0
+        # Latent codes manipulation.
         # latent = latent * mask[None, :, None]
-        # latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
+        if rw_pair is not None:
+            latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
         # latent[:] = latent[b_idx_ref:b_idx_ref+1]
-        latent = (latent, mask)
+        #
+        factors = [[1, 1]]
+        # factors = [[1,1], [0.5, 1], [1, 0.5], [0.5, 0.5], [0, 1], [1, 0]]
+        ori_latent = latent
+        lims = None
+        for factor_id, factor in enumerate(factors):
+            # if len(factor) == 2:
+            latent = torch.cat([ori_latent[..., :1, :] * factor[0],
+                                ori_latent[..., 1:, :] * factor[1]], dim=-2)
+            # elif len(factor) ==  1: latent = ori_latent[..., :1, :] * factor[0]
+            # else: raise NotImplementedError
 
-        feat_neg = torch.rand_like(feat) * 2 - 1
-        if replay_buffer is not None:
-            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
-                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
-                replay_batch = decompress_x_mod(replay_batch)
-                feat_neg = torch.Tensor(replay_batch).to(dev)
-                feat_neg = align_replayed_batch(feat, feat_neg)
-                if FLAGS.num_fixed_timesteps > 0:
-                    feat_neg = align_replayed_batch(feat, feat_neg)
+            latent = (latent, mask)
 
-        if sample_diff:
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories_diff(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
-                                                                                create_graph=False) # TODO: why create_graph
-        else:
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
-                                                                               create_graph=False) # TODO: why create_graph
-            # feat_neg, feat_negs, feat_neg_kl, feat_grad = \
-            #     gen_recursive(latent, FLAGS, models, models_ema, feat_neg, feat,
-            #                   ini_timesteps=7, stride=1, stage_steps=[40, 20, 40])
-        # feat_negs = torch.stack(feat_negs, dim=1) # 5 iterations only
-        if save:
-            print('Latents: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
-            # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
-            # Path(savedir).mkdir(parents=True, exist_ok=True)
-            # savename = "s%08d"% (step)
-            # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
-            limpos = limneg = 1 if FLAGS.plot_attr == 'loc' else 4
-            lims = [-limneg, limpos]
+            feat_neg = torch.rand_like(feat) * 2 - 1
 
-            lims = None
-            for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + i_plt)
-            # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
-            logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
-            print('Plotted.')
-        # elif logger is not None:
-        #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-        #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
+
+            feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+                                                                                   create_graph=False, fixed_mask=fixed_mask) # TODO: why create_graph
+
+            if save:
+                # print('Latents: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
+                # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
+                # Path(savedir).mkdir(parents=True, exist_ok=True)
+                # savename = "s%08d"% (step)
+                # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
+                limpos = limneg = 1
+                if torch.logical_not(nonan_mask).sum() > 0 and lims is None:
+                    lims = [-limneg, limpos]
+                elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
+                                           feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
+                for i_plt in range(len(feat_negs)):
+                    logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + i_plt + 100*factor_id)
+                # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
+                logger.add_figure('test_manip_gen', get_trajectory_figure(feat_negs[-1], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step + 100*factor_id)
+                print('Plotted.')
+            # elif logger is not None:
+            #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
         break
     print('test done')
     exit()
 
-def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logger=None, replay_buffer=None):
+def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = False, logger=None, replay_buffer=None):
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
         dev = torch.device("cpu")
 
     [model.eval() for model in models]
-    # [getattr(model, module).train() for model in models for module in ['rnn1', 'rnn2']]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
-        edges = edges.to(dev)
-        rel_rec = rel_rec.to(dev)
-        rel_send = rel_send.to(dev)
+        nonan_mask = feat == feat
+        feat[torch.logical_not(nonan_mask)] = 10
+        # edges = edges.to(dev)
+        # rel_rec = rel_rec.to(dev)
+        # rel_send = rel_send.to(dev)
 
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
         feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
+        # [:, :, FLAGS.num_fixed_timesteps:]
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
-            # Note: Test feature
         if isinstance(latent, tuple):
             latent, _ = latent
 
-        new_latent = models[-1].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
+        new_latent = models[FLAGS.trained_models].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(new_latent, tuple):
             new_latent, _ = latent
 
@@ -481,36 +431,21 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
         # Note: not all of it will be used. Last two dimensions are unused.
 
         feat_neg = torch.rand_like(feat) * 2 - 1
-        if replay_buffer is not None:
-            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
-                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
-                replay_batch = decompress_x_mod(replay_batch)
-                feat_neg = torch.Tensor(replay_batch).to(dev)
-                if FLAGS.num_fixed_timesteps > 0:
-                    feat_neg = align_replayed_batch(feat, feat_neg)
 
-
-        # Option 1: Test New feature --> EBM selector
-        # latent = (None, latent[..., 0])
-        # Option 2
-        mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
-        # mask = torch.ones((FLAGS.batch_size, FLAGS.components)).to(dev)
+        mask=mask[torch.randperm(FLAGS.batch_size)]
         latent = (latent, mask)
-        # Option 3
-        # latent = (None, weights[..., 0, 0])
 
-
-        feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+        feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                 create_graph=False) # TODO: why create_graph
 
-        ## Add to the replay buffer
-        if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
-            replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
-
         if save:
-            logger.add_figure('test_gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
+            limpos = limneg = 1
+            if torch.logical_not(nonan_mask).sum() > 0:
+                lims = [-limneg, limpos]
+            else: lims = None
+            logger.add_figure('test_gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
             for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
             # input('a')
             if replay_buffer is not None:
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
@@ -520,28 +455,25 @@ def test(train_dataloader, models, models_ema, FLAGS, step=0, save = False, logg
                 print('Latents: \n{}'.format( latent[0][0,...,0].detach().cpu().numpy()))
 
         elif logger is not None:
-            l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
+            l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
+                                - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
+
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-        # TODO: print sampling process
         break
 
     [model.train() for model in models]
 
-def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx, replay_buffer=None):
-
+def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, mask, logdir, rank_idx, replay_buffer=None):
+    step_lr = FLAGS.step_lr
+    num_steps = FLAGS.num_steps
+    vel_exists = FLAGS.input_dim == 4
     it = FLAGS.resume_iter
     losses, l2_losses = [], []
-    grad_norm_ema = None
     schedulers = [StepLR(optimizer, step_size=50000, gamma=0.5) for optimizer in optimizers]
+    # schedulers = [CosineAnnealingLR(optimizer, T_max=350000, eta_min=2e-5, last_epoch=-1) for optimizer in optimizers]
     [optimizer.zero_grad() for optimizer in optimizers]
 
-    if (FLAGS.replay_batch or FLAGS.entropy_nn) and replay_buffer is None:
-        replay_buffer = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)# Flags.transform
-        replay_buffer_test = ReplayBuffer(FLAGS.buffer_size, None, FLAGS)
-    else: replay_buffer_test = None
-
-    # if FLAGS.scheduler:
-    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers, T_max=1000, eta_min=0, last_epoch=-1)
+    replay_buffer_test = None
 
     dev = torch.device("cuda")
 
@@ -551,196 +483,76 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             loss = 0.0
             feat = feat.to(dev)
-            edges = edges.to(dev)
-            rel_rec = rel_rec.to(dev)
-            rel_send = rel_send.to(dev)
-            if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec, rel_send) for model in models]
+            nonan_mask = feat == feat
+            feat[torch.logical_not(nonan_mask)] = 10
+            # edges = edges.to(dev)
+
+            if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
+
+            #### Note: Opt. 2 ####
+            feat_copy = feat.clone()
+            max_loc = feat[..., :2].abs().max()
+
+            if vel_exists:
+                max_vel = feat[..., 2:].abs().max()
+            else: max_vel = 0
+            # feat_noise = torch.randn_like(feat).detach()
+            # feat_noise.normal_()
+            # feat_noise[..., :2] *= max_loc
+            # feat_noise[..., 2:] *= max_vel
+            # feat = feat + 0.002 * feat_noise
+            #### Note: TEST FEATURE ####
 
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
             else: feat_enc = feat
             feat_enc = normalize_trajectories(feat_enc, augment=True, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
-
-            rand_idx = torch.randint(FLAGS.trained_models, (1,))
+            # [:, :, FLAGS.num_fixed_timesteps+torch.randint(5, (1,)):]
+            rand_idx = torch.randint(len(models), (1,))
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
 
-            # Note: Test feature
             if isinstance(latent, tuple):
                 latent, _ = latent
 
-            new_latent = models[-1].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
-
+            new_latent = models[FLAGS.trained_models].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
             if isinstance(new_latent, tuple):
                 new_latent, weights = new_latent
                 l2_w_loss = torch.pow(weights, 2).mean()
-                # prod_w_loss = torch.prod(weights, 1).mean()
-                # loss = loss + 0.0005 * prod_w_loss - 0.0005 * l2_w_loss
             else: l2_w_loss = 0
 
             latent = torch.cat([latent, new_latent], dim=-2) # Note: not all of it will be used. Last two dimensions are unused.
 
-            # #### Note: TEST FEATURE #### In training sample only 2 chunks, with latents from all.
-            # len_feat = torch.randint(10, 18)
-            # idx_feat = torch.randint(0, feat.shape[2]-len_feat)
-            # feat = feat[:, :, idx_feat:idx_feat + len_feat]
-
-            ### Note: For OS model
-            # feat = feat[:, :, :12]
-
-            #### Note: TEST FEATURE #### Add noise to input after obtaining latents.
-            feat_noise = torch.randn_like(feat).detach()
-            feat_noise.normal_()
-            feat = feat + 0.001 * feat_noise
-                #### Note: Opt. 2 ####
-            max_loc = feat[..., :2].abs().max()
-            max_vel = feat[..., 2:].abs().max()
             feat_noise = torch.randn_like(feat).detach()
             feat_noise.normal_()
             feat_noise[..., :2] *= max_loc
             feat_noise[..., 2:] *= max_vel
-            feat = feat + 0.002 * feat_noise
-            #### Note: TEST FEATURE ####
+            feat = feat_copy + 0.002 * feat_noise
 
-            latent_norm = new_latent.norm()
+            latent_norm = latent.norm()
 
             feat_neg = torch.rand_like(feat) * 2 - 1
 
-            if FLAGS.replay_batch and len(replay_buffer) >= FLAGS.batch_size:
-                replay_batch, idxs = replay_buffer.sample(feat_neg.size(0))
-                replay_batch = decompress_x_mod(replay_batch)
-                replay_mask = (np.random.uniform(0, 1, feat_neg.size(0)) > 0.001)
-                feat_neg[replay_mask] = torch.Tensor(replay_batch[replay_mask]).to(dev)
-                if FLAGS.num_fixed_timesteps > 0:
-                    feat_neg = align_replayed_batch(feat, feat_neg)
-
-
-            # Option 1
-            # latent = (None, latent[..., 0]) # Note: Test feature
-            # Option 2
-            mask = torch.randint(2, (latent.shape[0], FLAGS.components)).to(dev)
-            # mask = torch.ones((latent.shape[0], FLAGS.components)).to(dev)
+            mask = mask[torch.randperm(FLAGS.batch_size)]
             latent = (latent, mask)
-            # Option 3
-            # latent = (None, weights[..., 0, 0])
 
-            feat_neg, feat_negs, feat_neg_kl, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-
+            feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
             feat_negs = torch.stack(feat_negs, dim=1)
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
-            feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
-            feat_loss_l1 = torch.abs(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:]).mean()
+            feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
+                                  - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
 
-            ## Compute losses
+            pow_energy_rec = torch.pow(energy_neg, 2).mean()
+            loss = loss + feat_loss #+ feat_loss_l1
 
-            #### TEST FEATURE ####
-            # kl_edge_loss = 0 #kl_categorical_uniform(latent[1], FLAGS.n_objects, num_edge_types=2, add_const=False, eps=1e-16) # kl_categorical(latent[1], math.log(0.5), FLAGS.components, eps=1e-16) # n_objects
-            # loss = loss + 10 * kl_edge_loss
-
-            #### TEST FEATURE #### maximize MMD
-            if FLAGS.mmd:
-                mmd_loss = MMD(latent)
-                loss = loss - mmd_loss
-
-            if FLAGS.autoencode or FLAGS.cd_and_ae:
-                loss = loss + feat_loss #+ feat_loss_l1
-
-            if not FLAGS.autoencode or FLAGS.cd_and_ae:
-                # mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
-                # latent = (latent, mask)
-
-                rand_idx_cd = torch.randint(len(models), (1,))
-
-                latent, mask = latent
-                #
-                # ### Note: TEST FEATURE ###
-                if FLAGS.cd_mode == 'mix':
-                    latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
-                    latent = latent * mask[:, :, None] + latent_cyc * (1-mask)[:, :, None]
-                    latent = (latent, mask)
-
-                    nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
-                    feat_neg_cd, _, _, _ = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
-                    FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
-
-                    latent = latent[0]
-
-                elif FLAGS.cd_mode == 'zeros':
-                    latent =  (latent * mask[:, :, None], mask) # TODO: Mix elements from the batch
-                    feat_neg_cd = feat_neg
-
-                elif FLAGS.cd_mode == '': feat_neg_cd = feat_neg
-                else: raise NotImplementedError
-
-                energy_pos = models[rand_idx_cd].forward(feat, latent)
-                energy_neg = models[rand_idx_cd].forward(feat_neg_cd.detach(), latent)
-
-                ## Contrastive Divergence loss.
-                ml_loss = (energy_pos - energy_neg).mean()
-
-                ## Energy regularization losses
-                loss = loss + 0.5 * ml_loss #energy_pos.mean() - energy_neg.mean() # TODO: HARDCODED WEIGHTS!
-                loss = loss + 0.5 * (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
-
-            ## Add to the replay buffer
-            if (FLAGS.replay_batch or FLAGS.entropy_nn) and (feat_neg is not None):
-                replay_buffer.add(compress_x_mod(feat_neg.detach().cpu().numpy()))
-
-            ## Smoothness loss
-            if FLAGS.sm:
-                diff_feat_negs = feat_negs[:, -1, ..., 1:, :] - feat_negs[:, -1, ..., :-1, :]
-                # loss_sm = torch.pow(diff_feat_negs, 2).mean()
-                # Second order
-                loss_sm = torch.pow(diff_feat_negs[..., 1:, :] - diff_feat_negs[..., :-1, :], 2).mean()
-                loss = loss + FLAGS.sm_coeff * loss_sm
-            else:
-                loss_sm = torch.zeros(1).mean()
-
-            ## KL loss
-            if FLAGS.kl:
-                model = models[rand_idx_cd]
-                model.requires_grad_(False)
-                loss_kl = model.forward(feat_neg_kl, latent[0])
-                model.requires_grad_(True)
-                loss = loss + FLAGS.kl_coeff * loss_kl.mean()
-
-                if FLAGS.entropy_nn:
-                    bs = feat_neg_kl.size(0)
-
-                    feat_flat = torch.clamp(feat_neg_kl.view(bs, -1), -1, 1)
-
-                    if len(replay_buffer) > bs:
-                        compare_batch, idxs = replay_buffer.sample(100) #, no_transform=False, downsample=True)
-                        compare_batch = decompress_x_mod(compare_batch)
-                        compare_batch = torch.Tensor(compare_batch).cuda(dev)
-                        compare_flat = compare_batch.view(100, -1)
-                        dist_matrix = torch.norm(feat_flat[:, None, :] - compare_flat[None, :, :], p=2, dim=-1)
-                        loss_repel = torch.log(dist_matrix.min(dim=1)[0]).mean()
-                    else:
-                        loss_repel = torch.zeros(1).cuda(dev)
-                    loss = loss - 0.3 * loss_repel
-                else:
-                    loss_repel = torch.zeros(1)
-            else:
-                loss_kl = torch.zeros(1)
-
+            loss_sm = torch.zeros(1).mean()
+            loss_kl = torch.zeros(1)
             loss.backward()
 
-            if FLAGS.gpus > 1:
-                average_gradients(models)
-
-            # grad_norm = torch.norm(feat_grad)
-            # if not grad_norm_ema:
-            #     grad_norm_ema = torch.norm(feat_grad)
-            # else: grad_norm_ema = ema_grad_norm(grad_norm, grad_norm_ema, mu=0.99)
-
-            if it > 30000:
-                [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
-            # [torch.nn.utils.clip_grad_value_(model.parameters(), 0.05) for model in models] # Note: Takes very long in debug
-            # [clip_grad_norm_with_ema(model, grad_norm_ema, std=0.001) for model in models]
-
-            if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
+            # if it > 30000:
+            #     [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
+            if it % FLAGS.log_interval == 0 :# and rank_idx == FLAGS.gpu_rank
                 model_grad_norm = get_model_grad_norm(models)
                 model_grad_max = get_model_grad_max(models)
 
@@ -748,12 +560,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             [optimizer.zero_grad() for optimizer in optimizers]
             [scheduler.step() for scheduler in schedulers]
 
-            if FLAGS.sample_ema:
-                ema_model(models, models_ema, mu=0.99)
-
             losses.append(loss.item())
             l2_losses.append(feat_loss.item())
-            if it % FLAGS.log_interval == 0 and rank_idx == FLAGS.gpu_rank:
+            if it % FLAGS.log_interval == 0 : #and rank_idx == FLAGS.gpu_rank
+
                 grad_norm = torch.norm(feat_grad)
 
                 avg_loss = sum(losses) / len(losses)
@@ -763,17 +573,19 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 kvs = {}
                 kvs['loss'] = avg_loss
                 # TODO: print learning rate.
-                if not FLAGS.autoencode or FLAGS.cd_and_ae:
-                    energy_pos_mean = energy_pos.mean().item()
-                    energy_neg_mean = energy_neg.mean().item()
-                    energy_pos_std = energy_pos.std().item()
-                    energy_neg_std = energy_neg.std().item()
+                # # if not FLAGS.autoencode:
+                #     energy_pos_mean = energy_pos.mean().item()
+                #     energy_pos_std = energy_pos.std().item()
+                #
+                #     kvs['aaa-ml_loss'] = ml_loss.item()
+                #     kvs['aa-energy_pos_mean'] = energy_pos_mean
+                #     kvs['energy_pos_std'] = energy_pos_std
 
-                    kvs['aaa-ml_loss'] = ml_loss.item()
-                    kvs['aa-energy_pos_mean'] = energy_pos_mean
-                    kvs['aa-energy_neg_mean'] = energy_neg_mean
-                    kvs['energy_pos_std'] = energy_pos_std
-                    kvs['energy_neg_std'] = energy_neg_std
+                energy_neg_mean = energy_neg.mean().item()
+                energy_neg_std = energy_neg.std().item()
+
+                kvs['aa-energy_neg_mean'] = energy_neg_mean
+                kvs['energy_neg_std'] = energy_neg_std
 
                 kvs['LR'] = schedulers[0].get_last_lr()[0]
                 kvs['aaa-L2_loss'] = avg_feat_loss
@@ -784,17 +596,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
                 kvs['weight_l2_loss'] = l2_w_loss
 
-                if FLAGS.mmd:
-                    kvs['mmd_loss'] = mmd_loss.mean().item()
-
-                if FLAGS.entropy_nn:
-                    kvs['entropy_loss'] = loss_repel.mean().item()
                 if FLAGS.sm:
                     kvs['sm_loss'] = loss_sm.item()
 
                 kvs['bb-max_abs_grad'] = torch.abs(feat_grad).max()
                 kvs['bb-norm_grad'] = grad_norm
-                # kvs['bb-norm_grad_ema'] = grad_norm_ema
                 kvs['bb-norm_grad_model'] = model_grad_norm
                 kvs['bb-max_abs_grad_model'] = model_grad_max
 
@@ -806,20 +612,30 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                         string += "%s: %.6f  " % (k,v)
                     logger.add_scalar(k, v, it)
 
+                limpos = limneg = 1
+                if torch.logical_not(nonan_mask).sum() > 0:
+                    lims = [-limneg, limpos]
+                else: lims = None
                 if it % 500 == 0:
                     for i_plt in range(feat_negs.shape[1]):
-                        logger.add_figure('gen', get_trajectory_figure(feat_negs[:, i_plt], b_idx=0, plot_type =FLAGS.plot_attr)[1], it + i_plt)
-                else: logger.add_figure('gen', get_trajectory_figure(feat_neg, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                        logger.add_figure('gen', get_trajectory_figure(feat_negs[:, i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it + i_plt)
+                else: logger.add_figure('gen', get_trajectory_figure(feat_neg, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
 
-                logger.add_figure('gt', get_trajectory_figure(feat, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
-
-                test(test_dataloader, models, models_ema, FLAGS, step=it, save=False, logger=logger, replay_buffer=replay_buffer_test)
+                logger.add_figure('gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                test(test_dataloader, models, models_ema, FLAGS, mask, step=it, save=False, logger=logger, replay_buffer=replay_buffer_test)
 
                 string += 'Time: %.1fs' % (time.perf_counter()-start_time)
                 print(string)
                 start_time = time.perf_counter()
 
-            if it % FLAGS.save_interval == 0 and rank_idx == FLAGS.gpu_rank:
+            if it == FLAGS.resume_iter:
+                shutil.copy(sys.argv[0], logdir + '/train_EBM_saved.py')
+                # print('sysargv', sys.argv)
+                shutil.copy('models.py', logdir + '/models_EBM_saved.py')
+
+            if it % FLAGS.save_interval == 0: #  and rank_idx == FLAGS.gpu_rank
+                mask = create_masks(FLAGS, dev) # Change them once overy log_interval
+
                 model_path = osp.join(logdir, "model_{}.pth".format(it))
 
                 ckpt = {'FLAGS': FLAGS}
@@ -839,7 +655,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                     torch.save(replay_buffer, replay_buffer_path)
                     # a = torch.load(replay_buffer_path)
 
-                test(test_dataloader, models, models_ema, FLAGS, step=it, save=True, logger=logger, replay_buffer=replay_buffer_test)
+                test(test_dataloader, models, models_ema, FLAGS, mask, step=it, save=True, logger=logger, replay_buffer=replay_buffer_test)
                 print('Test at step %d done!' % it)
                 exp_name = logger.log_dir.split('/')
                 print('Experiment: ' + exp_name[-2] + '/' + exp_name[-1])
@@ -849,13 +665,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 def main_single(rank, FLAGS):
     rank_idx = FLAGS.node_rank * FLAGS.gpus + rank
     world_size = FLAGS.nodes * FLAGS.gpus
-
     if not os.path.exists('result/%s' % FLAGS.exp):
         try:
             os.makedirs('result/%s' % FLAGS.exp)
         except:
             pass
-
 
     if FLAGS.dataset == 'springs':
         dataset = SpringsParticles(FLAGS, 'train')
@@ -869,6 +683,9 @@ def main_single(rank, FLAGS):
     elif FLAGS.dataset == 'charged-springs':
         dataset = ChargedSpringsParticles(FLAGS, 'train')
         test_dataset = ChargedSpringsParticles(FLAGS, 'test')
+    elif FLAGS.dataset.split('_')[0] == 'trajnet':
+        dataset = TrajnetDataset(FLAGS, 'train')
+        test_dataset = TrajnetDataset(FLAGS, 'test')
     else:
         raise NotImplementedError
     FLAGS.timesteps = FLAGS.num_timesteps
@@ -883,55 +700,42 @@ def main_single(rank, FLAGS):
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
 
-    branch_folder = 'joint-split-onestep'
-    if FLAGS.logname == 'debug':
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
-    else:
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, branch_folder,
-                            'NO' +str(FLAGS.n_objects)
-                          + '_BS' + str(FLAGS.batch_size)
-                          + '_S-LR' + str(FLAGS.step_lr)
-                          + '_NS' + str(FLAGS.num_steps)
-                          + '_LR' + str(FLAGS.lr)
-                          + '_LDim' + str(FLAGS.latent_dim)
-                          # + '_KL' + str(int(FLAGS.kl))
-                          # + '_SM' + str(int(FLAGS.sm))
-                          + '_SN' + str(int(FLAGS.spectral_norm))
-                          # + '_Mom' + str(FLAGS.momentum)
-                          # + '_EMA' + str(int(FLAGS.sample_ema))
-                          + '_RB' + str(int(FLAGS.replay_batch))
-                          + '_AE' + str(int(FLAGS.autoencode))
-                          + '_FC' + str(FLAGS.forecast)
-                          + '_CDAE' + str(int(FLAGS.cd_and_ae))
-                          + FLAGS.cd_mode
-                          + '_OID' + str(int(FLAGS.obj_id_embedding))
-                          # + '_MMD' + str(int(FLAGS.mmd))
-                          + '_FE' + str(int(FLAGS.factor_encoder))
-                          + '_NDL' + str(int(FLAGS.normalize_data_latent))
-                          + '_SeqL' + str(int(FLAGS.num_timesteps))
-                          + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
-        if FLAGS.logname != '':
-            logdir += '_' + FLAGS.logname
-
+    branch_folder = 'experiments'
+    # if FLAGS.logname == 'debug':
+    #     logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
+    # else:
+    #     logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.ori_dataset,
+    #                         'NO' +str(FLAGS.n_objects)
+    #                       + '_BS' + str(FLAGS.batch_size)
+    #                       + '_S-LR' + str(FLAGS.step_lr)
+    #                       + '_NS' + str(FLAGS.num_steps)
+    #                       + '_LR' + str(FLAGS.lr)
+    #                       + '_LDim' + str(FLAGS.latent_dim)
+    #                       + '_SN' + str(int(FLAGS.spectral_norm))
+    #                       + '_AE' + str(int(FLAGS.autoencode))
+    #                       + '_FC' + str(FLAGS.forecast)
+    #                       + '_FE' + str(int(FLAGS.factor_encoder))
+    #                       + '_NDL' + str(int(FLAGS.normalize_data_latent))
+    #                       + '_SeqL' + str(int(FLAGS.num_timesteps))
+    #                       + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
+    #     if FLAGS.logname != '':
+    #         logdir += '_' + FLAGS.logname
     FLAGS_OLD = FLAGS
 
     if FLAGS.resume_iter != 0:
         if FLAGS.resume_name is not '':
-            logdir = osp.join(FLAGS.logdir, FLAGS.exp, branch_folder, FLAGS.resume_name)
+            logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.ori_dataset, FLAGS.resume_name)
 
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
-        if FLAGS.replay_batch:
-            try:
-                replay_buffer = torch.load(osp.join(logdir, "rb.pt"))
-            except: pass
         FLAGS = checkpoint['FLAGS']
 
-        # logdir += '_FSeqL0_RB1' # TODO: remove
-        FLAGS.trained_models = FLAGS.ensembles # New variable for incremental learning test
+        # FLAGS.normalize_data_latent = FLAGS_OLD.normalize_data_latent # Maybe we shouldn't override
+        # FLAGS.factor_encoder = FLAGS_OLD.factor_encoder
+        # FLAGS.ensembles = FLAGS_OLD.ensembles
+        FLAGS.n_objects = FLAGS_OLD.n_objects
+        FLAGS.components = FLAGS_OLD.components
 
-        FLAGS.normalize_data_latent = FLAGS_OLD.normalize_data_latent # Maybe we shouldn't override
-        FLAGS.factor_encoder = FLAGS_OLD.factor_encoder
         FLAGS.plot_attr = FLAGS_OLD.plot_attr
         FLAGS.resume_iter = FLAGS_OLD.resume_iter
         FLAGS.save_interval = FLAGS_OLD.save_interval
@@ -941,52 +745,81 @@ def main_single(rank, FLAGS):
         FLAGS.train = FLAGS_OLD.train
         FLAGS.batch_size = FLAGS_OLD.batch_size
         FLAGS.num_visuals = FLAGS_OLD.num_visuals
-        FLAGS.num_additional = FLAGS_OLD.num_additional
         FLAGS.decoder = FLAGS_OLD.decoder
         FLAGS.test_manipulate = FLAGS_OLD.test_manipulate
         FLAGS.lr = FLAGS_OLD.lr
-        # FLAGS.sim = FLAGS_OLD.sim
         FLAGS.ensembles = FLAGS_OLD.ensembles
+        FLAGS.trained_models = FLAGS_OLD.trained_models
+        # FLAGS.sim = FLAGS_OLD.sim
         FLAGS.exp = FLAGS_OLD.exp
         FLAGS.step_lr = FLAGS_OLD.step_lr
         FLAGS.num_steps = FLAGS_OLD.num_steps
         FLAGS.num_steps_test = FLAGS_OLD.num_steps_test
         FLAGS.forecast = FLAGS_OLD.forecast
-        FLAGS.autoencode = FLAGS_OLD.autoencode
-        FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
+        FLAGS.ns_iteration_end = FLAGS_OLD.ns_iteration_end
+        FLAGS.num_steps_end = FLAGS_OLD.num_steps_end
+
+        FLAGS.model_name = FLAGS_OLD.model_name
+        FLAGS.masking_type = FLAGS_OLD.masking_type
+
+        # FLAGS.autoencode = FLAGS_OLD.autoencode
+        # FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
         FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
         FLAGS.num_fixed_timesteps = FLAGS_OLD.num_fixed_timesteps
-
         # TODO: Check what attributes we are missing
+
+        print(FLAGS)
+
         models, optimizers  = init_model(FLAGS, device, dataset)
 
         assert FLAGS.trained_models < FLAGS.ensembles
 
         state_dict = models[0].state_dict()
 
-        if FLAGS.sample_ema:
-            models_ema, _  = init_model(FLAGS, device, dataset)
-            for idx, (model, model_ema, optimizer) in enumerate(zip(models, models_ema, optimizers)):
-                if idx < len(models) - 2: # Note: we could also have a single new model.
-                    model.load_state_dict(checkpoint['model_state_dict_{}'.format(idx)], strict=False)
-                    optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(idx)])
-                    model_ema.load_state_dict(checkpoint['ema_model_state_dict_{}'.format(idx)], strict=False)
-                    for param in model.parameters(): # TODO: Same for model EMA?
-                        param.requires_grad = False
-                    print('Model {}/{} loaded and frozen.'.format(idx+1,len(models)))
-        else:
-            models_ema = None
-            for idx, (model, optimizer) in enumerate(zip(models, optimizers)):
-                if idx < len(models) - 2:
-                    model.load_state_dict(checkpoint['model_state_dict_{}'.format(idx)], strict=False)
-                    optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(idx)])
-                    for param in model.parameters():
-                        param.requires_grad = False
-                    print('Model {}/{} loaded and frozen.'.format(idx+1,len(models)))
+
+        models_ema = None
+        for idx, (model, optimizer) in enumerate(zip(models, optimizers)):
+            if idx < FLAGS.trained_models:
+                model.load_state_dict(checkpoint['model_state_dict_{}'.format(idx)], strict=False)
+                # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(idx)])
+                for param in model.parameters():
+                    param.requires_grad = False
+                print('Model {}/{} loaded and frozen.'.format(idx+1,len(models)))
+            # if idx >= FLAGS.trained_models:
+            #     model.load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
+                # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(0)])
+
     else:
         print('A model must be loaded.')
         raise NotImplementedError
 
+    # TODO: REPEATED CODE, clean.
+    branch_folder = 'experiments_incremental'
+    if FLAGS.logname == 'debug':
+        logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
+    else:
+        logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.exp,
+                          'NO' +str(FLAGS.n_objects)
+                          + '_BS' + str(FLAGS.batch_size)
+                          + '_S-LR' + str(FLAGS.step_lr)
+                          + '_NS' + str(FLAGS.num_steps)
+                          + '_LR' + str(FLAGS.lr)
+                          + '_LDim' + str(FLAGS.latent_dim)
+                          + '_SN' + str(int(FLAGS.spectral_norm))
+                          + '_AE' + str(int(FLAGS.autoencode))
+                          + '_CDAE' + str(int(FLAGS.cd_and_ae))
+                          + '_Mod' + str(FLAGS.model_name)
+                          + '_NMod' + str(FLAGS.ensembles//2)
+                          + '_Mask-' + str(FLAGS.masking_type)
+                          + '_FC' + str(FLAGS.forecast)
+                          + '_FE' + str(int(FLAGS.factor_encoder))
+                          + '_NDL' + str(int(FLAGS.normalize_data_latent))
+                          + '_SeqL' + str(int(FLAGS.num_timesteps))
+                          + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
+    if FLAGS.logname != '':
+        logdir += '_' + FLAGS.logname
+    if not osp.exists(logdir):
+        os.makedirs(logdir)
     if FLAGS.gpus > 1:
         sync_model(models)
 
@@ -997,33 +830,30 @@ def main_single(rank, FLAGS):
     logger = SummaryWriter(logdir)
     it = FLAGS.resume_iter
 
+    mask = create_masks(FLAGS, torch.device("cuda"))
+
     if FLAGS.train:
         models = [model.train() for model in models]
-        if FLAGS.sample_ema:
-            models_ema = [model_ema.train() for model_ema in models_ema]
     else:
         models = [model.eval() for model in models]
-        if FLAGS.sample_ema:
-            models_ema = [model_ema.eval() for model_ema in models_ema]
 
     if FLAGS.train:
-        train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, logdir, rank_idx, replay_buffer)
+        train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, mask, logdir, rank_idx, replay_buffer)
 
-    elif FLAGS.test_manipulate: # TODO: What is this
+    elif FLAGS.test_manipulate:
         test_manipulate(test_manipulate_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter, save=True, logger=logger)
     else:
-        test(test_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter)
+        test(test_dataloader, models, models_ema, FLAGS, mask, step=FLAGS.resume_iter)
 
 
 def main():
     FLAGS = parser.parse_args()
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = 4 + 2
+    FLAGS.ensembles = FLAGS.trained_models + 2
     FLAGS.tie_weight = True
     FLAGS.sample = True
-    FLAGS.exp = FLAGS.dataset
-
-    logdir = osp.join(FLAGS.logdir, FLAGS.exp)
+    FLAGS.exp = FLAGS.exp + FLAGS.dataset
+    logdir = osp.join(FLAGS.logdir, 'experiments', FLAGS.exp)
 
     if not osp.exists(logdir):
         os.makedirs(logdir)
