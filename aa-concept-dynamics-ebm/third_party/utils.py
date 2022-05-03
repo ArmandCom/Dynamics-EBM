@@ -427,22 +427,27 @@ def normalize_trajectories(state, augment=False, normalize=True):
 def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None):
     fig = plt.figure()
     axes = plt.gca()
-    lw = 2.5
+    lw = 1.5
+    sz_pt = 20
+    maps = ['afmhot', 'cool', 'Wistia', 'YlGnBu'] #https://matplotlib.org/2.0.2/examples/color/colormaps_reference.html
+    cmap = maps[2]
+    alpha = 0.8
     if lims is not None:
         axes.set_xlim([lims[0], lims[1]])
         axes.set_ylim([lims[0], lims[1]])
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
     # vel_norm = np.sqrt((vel ** 2).sum(axis=1))
-
+    colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g']
     if highlight_nodes is not None:
         modes = ['-' if node == 0 else '--' for node in highlight_nodes]
         assert len(modes) == loc.shape[-1]
     else: modes = ['-']*loc.shape[-1]
     if plot_type == 'loc' or plot_type == 'both':
         for i in range(loc.shape[-1]):
-            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i], modes[i], linewidth=lw)
-            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i], modes[i], c=colors[i], linewidth=lw)
+            # plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+            plt.scatter(loc[0, :, 0, i], loc[0, :, 1, i], s=sz_pt, c=np.arange(loc.shape[1]), cmap=cmap, alpha=alpha)
         pass
     if plot_type == 'vel' or plot_type == 'both':
         for i in range(loc.shape[-1]):
@@ -451,9 +456,9 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
             for t in range(loc.shape[1] - 1):
                 acc_pos = np.concatenate([acc_pos[0], acc_pos[0][t:t+1]+vels[0][t:t+1]]), \
                           np.concatenate([acc_pos[1], acc_pos[1][t:t+1]+vels[1][t:t+1]])
-            plt.plot(acc_pos[0], acc_pos[1], modes[i], linewidth=lw)
-            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
-
+            plt.plot(acc_pos[0], acc_pos[1], modes[i], c=colors[i], linewidth=lw)
+            # plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
+            plt.scatter(loc[0, :, 0, i], loc[0, :, 1, i], s=sz_pt, c=np.arange(loc.shape[1]), cmap=cmap, alpha=alpha)
     return plt, fig
 
 def accumulate_traj(states):
@@ -521,6 +526,19 @@ def get_model_grad_max(models):
     parameters = [abs(p.grad.detach()).max() for p in models[0].parameters() if p.grad is not None and p.requires_grad]
     return max(parameters)
 
+def create_masks(FLAGS, dev):
+    if FLAGS.masking_type == 'random':
+        mask = torch.randint(2, (FLAGS.batch_size, FLAGS.components)).to(dev)
+    elif FLAGS.masking_type == 'ones':
+        mask = torch.ones((FLAGS.batch_size, FLAGS.components)).to(dev)
+    elif FLAGS.masking_type == 'by_receiver':
+        mask = torch.ones((FLAGS.batch_size, FLAGS.components)).to(dev)
+        node_ids = torch.randint(FLAGS.n_objects, (FLAGS.batch_size,))
+        sel_edges = (FLAGS.n_objects - 1)*node_ids
+        for n in range(FLAGS.n_objects-1):
+            mask[torch.arange(0, FLAGS.batch_size), sel_edges+n] = 0
+    else: raise NotImplementedError
+    return mask
 # class Downsample(nn.Module):
 #     def __init__(self, pad_type='reflect', filt_size=3, stride=2, channels=None, pad_off=0):
 #         super(Downsample, self).__init__()
