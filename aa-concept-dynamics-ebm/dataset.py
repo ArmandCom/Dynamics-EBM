@@ -263,6 +263,7 @@ class SpringsParticles(data.Dataset):
         self.args = args
         self.n_objects = args.n_objects
         suffix = '_springs'+str(self.n_objects)
+        suffix += 'inter0.1_nowalls_sf100_len5000'
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
@@ -279,7 +280,10 @@ class SpringsParticles(data.Dataset):
         # self.sample_freq = args.sample_freq # default: 100
         # self.sequence_length = args.sequence_length # default: 1000
 
-        # Generate off-diagonal interaction graph
+        # ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
+        # batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
+        # ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
+        # self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
         self.feat, self.edges = feat[:, :, :self.timesteps], edges
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
@@ -387,7 +391,6 @@ class ChargedParticles(data.Dataset):
         # self.sample_freq = args.sample_freq # default: 100
         # self.sequence_length = args.sequence_length # default: 1000
 
-        # Generate off-diagonal interaction graph
         # ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
         # batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
         # ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
