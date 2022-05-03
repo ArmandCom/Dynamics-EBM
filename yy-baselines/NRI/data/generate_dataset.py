@@ -26,7 +26,8 @@ parser.add_argument('--seed', type=int, default=42,
 args = parser.parse_args()
 
 if args.simulation == 'springs':
-    sim = SpringSim(noise_var=0.0, n_balls=args.n_balls)
+    sim = SpringSim(noise_var=0.0, n_balls=args.n_balls,
+                    box_size=float('inf'))
     suffix = '_springs'
 elif args.simulation == 'charged':
     sim = ChargedParticlesSim(noise_var=0.0, n_balls=args.n_balls,
@@ -35,16 +36,17 @@ elif args.simulation == 'charged':
     suffix = '_charged'
 elif args.simulation == 'charged-springs':
     sim = ChargedSpringsParticlesSim(noise_var=0.0, n_balls=args.n_balls,
-                              box_size=float('inf'), loc_std=1., vel_norm=0.5,
-                              interaction_strength=.5)
+                              box_size=float('inf'), loc_std=1., vel_norm=0.5)
     suffix = '_charged-springs'
 else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
 # suffix += 'inter0.5_nowalls_sf100_len50000_test-mixed'
-suffix += 'inter0.5_nowalls_sf100_len50000_test-mixed_byNodeType'
-# suffix += 'inter0.5_nowalls_sf100_len5000'
+# suffix += 'inter0.5_nowalls_sf100_len50000_test-mixed_byNodeType'
+
+suffix += 'inters0.1c0.5_nowalls_sf100_len5000'
+# suffix += 'inter0.1_nowalls_sf100_len5000'
 np.random.seed(args.seed)
 
 print(suffix)

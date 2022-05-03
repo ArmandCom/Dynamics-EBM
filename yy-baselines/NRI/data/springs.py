@@ -104,10 +104,6 @@ class SpringSim(object):
             np.fill_diagonal(forces_size,
                              0)  # self forces are zero (fixes division by zero)
 
-
-
-
-
             ### End change ###
             F = (forces_size.reshape(1, n, n) *
                  np.concatenate((

@@ -230,7 +230,7 @@ class ChargedParticlesSim(object):
 
         # disables division by zero warning, since I fix it with fill_diagonal
         with np.errstate(divide='ignore'):
-            print(edges.shape)
+            # print(edges.shape)
 
             # half step leapfrog
             l2_dist_power3 = np.power(
@@ -291,15 +291,15 @@ class ChargedParticlesSim(object):
 
 class ChargedSpringsParticlesSim(object):
     def __init__(self, n_balls=5, box_size=5., loc_std=.5, vel_norm=.5,
-                 interaction_strength=.1, noise_var=0.):
+                 interaction_strength_springs=.1, interaction_strength_charged=.5, noise_var=0.):
         # (self, n_balls=5, box_size=5., loc_std=1., vel_norm=0.5,
         # interaction_strength=1., noise_var=0.)
         self.n_balls = n_balls
         self.box_size = box_size
         self.loc_std = loc_std
         self.vel_norm = vel_norm
-        self.interaction_strength_springs = interaction_strength
-        self.interaction_strength_charged = interaction_strength
+        self.interaction_strength_springs = interaction_strength_springs
+        self.interaction_strength_charged = interaction_strength_charged
         self.noise_var = noise_var
 
         self._spring_types = np.array([0., 0.5, 1.])
