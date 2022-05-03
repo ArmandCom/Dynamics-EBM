@@ -556,10 +556,9 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             feat = feat.to(dev)
             nonan_mask = feat == feat
             feat[torch.logical_not(nonan_mask)] = 10
-            edges = edges.to(dev)
-            rel_rec = rel_rec.to(dev)
-            rel_send = rel_send.to(dev)
-            if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec, rel_send) for model in models]
+            # edges = edges.to(dev)
+
+            if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
 
             #### Note: Opt. 2 ####
             feat_copy = feat.clone()
