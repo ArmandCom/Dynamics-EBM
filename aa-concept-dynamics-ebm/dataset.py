@@ -263,7 +263,9 @@ class SpringsParticles(data.Dataset):
         self.args = args
         self.n_objects = args.n_objects
         suffix = '_springs'+str(self.n_objects)
-        suffix += 'inter0.1_nowalls_sf100_len5000'
+        # suffix += 'inter0.1_nowalls_sf100_len5000'
+        suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
+        # suffix += 'inter0.1_nowalls_sf20_lentrain5000_nstrain50000' # 249 samples # TODO: Change velocity normalization
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
@@ -280,11 +282,14 @@ class SpringsParticles(data.Dataset):
         # self.sample_freq = args.sample_freq # default: 100
         # self.sequence_length = args.sequence_length # default: 1000
 
-        # ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
-        # batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
-        # ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
-        # self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
-        self.feat, self.edges = feat[:, :, :self.timesteps], edges
+        print('-Randomly placed trajectory.')
+        ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
+        batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
+        ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
+        self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
+
+        # print('-Trajectory begins at start.')
+        # self.feat, self.edges = feat[:, :, :self.timesteps], edges
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
         self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
@@ -319,20 +324,27 @@ class SpringsParticles(data.Dataset):
         num_atoms = loc.shape[3]
 
         # Note: unnormalize
-        print("Normalized Charged Dataset")
+
         loc_max = loc.max()
         loc_min = loc.min()
-        vel = vel / 10
+        vel = vel / 20
         # Note: In simulation our increase in T (delta T) is 0.001.
-        #  Then we sample 1/10 generated samples.
+        #  Then we sample 1/100 generated samples.
         #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
         vel_max = vel.max()
         vel_min = vel.min()
 
+        print("Normalized Springs Dataset")
         # Normalize to [-1, 1]
         loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
         # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
         vel = vel * 2 / (loc_max - loc_min)
+
+        # print("Standardized Springs Dataset")
+        # loc_mean = loc.mean()
+        # loc_std = loc.std()
+        # loc = (loc - loc_mean) / loc_std
+        # vel = vel / loc_std
 
         # print("Unnormalized Spring Dataset")
         # loc_max = None
@@ -372,8 +384,9 @@ class ChargedParticles(data.Dataset):
 
         suffix = '_charged'+str(self.n_objects)
         # suffix += '_nobox_05int-strength'
-        suffix += 'inter0.5_nowalls_sf100_len5000'
-        # suffix += 'inter0.5_nowalls_sf10'
+        # suffix += 'inter0.5_nowalls_sf100_len5000'
+        suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
+        # suffix += 'inter0.5_nowalls_sf20_lentrain5000_nstrain50000' # 249 samples # TODO: Change velocity normalization
 
         feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
@@ -391,11 +404,14 @@ class ChargedParticles(data.Dataset):
         # self.sample_freq = args.sample_freq # default: 100
         # self.sequence_length = args.sequence_length # default: 1000
 
-        # ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
-        # batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
-        # ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
-        # self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
-        self.feat, self.edges = feat[:, :, :self.timesteps], edges
+        print('-Randomly placed trajectory.')
+        ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
+        batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
+        ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
+        self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
+
+        # print('-Trajectory begins at start.')
+        # self.feat, self.edges = feat[:, :, :self.timesteps], edges
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
         self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
@@ -433,9 +449,9 @@ class ChargedParticles(data.Dataset):
 
         loc_max = loc.max()
         loc_min = loc.min()
-        vel = vel / 10
+        vel = vel / 20 # 10 if sf 100, 50 if sf 20
         # Note: In simulation our increase in T (delta T) is 0.001.
-        #  Then we sample 1/10 generated samples.
+        #  Then we sample 1/100 generated samples.
         #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
         vel_max = vel.max()
         vel_min = vel.min()
@@ -445,6 +461,13 @@ class ChargedParticles(data.Dataset):
         loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
         vel = vel * 2 / (loc_max - loc_min)
         # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+
+        # print("Standardized Charged Dataset")
+        # loc_mean = loc.mean()
+        # loc_std = loc.std()
+        # loc = (loc - loc_mean) / loc_std
+        # vel = vel / loc_std
 
         # print("Unnormalized Charged Dataset")
 
@@ -478,7 +501,12 @@ class ChargedSpringsParticles(data.Dataset):
 
         suffix = '_charged-springs'+str(self.n_objects)
         # suffix += '_nobox_05int-strength'
-        suffix += 'inter0.5_nowalls_sf100_len5000_test-mixed'
+        print('------TRAINING with 1000 SAMPLES-------')
+        suffix +='1000samples_inter_s0.1_c0.5_sf50_lentrain5000_nstrain1000_mixedbynode'
+
+        # suffix += 'inter_s0.1_c0.5_nowalls_sf100_lentrain5000_nstrain1_mixedbynode' # Only for test.
+
+        # suffix += 'inter0.5_nowalls_sf100_len5000_test-mixed'
 
         # suffix += 'inter0.5_nowalls_sf10'
 
@@ -556,22 +584,88 @@ class ChargedSpringsParticles(data.Dataset):
         loc = np.transpose(loc, [0, 3, 1, 2])
         vel = np.transpose(vel, [0, 3, 1, 2])
         feat = np.concatenate([loc, vel], axis=3)
-        edges = np.reshape(edges, [-1, num_atoms ** 2])
-        edges = np.array((edges + 1) / 2, dtype=np.int64)
+
+
+        # Note: Here, we use edges differently, as we want to know which of them has been modified
+        # edges = np.reshape(edges, [-1, num_atoms ** 2])
+        # edges = np.array((edges + 1) / 2, dtype=np.int64)
 
         feat = torch.FloatTensor(feat)
         edges = torch.LongTensor(edges)
 
         # Exclude self edges
-        off_diag_idx = np.ravel_multi_index(
-            np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
-            [num_atoms, num_atoms])
-        edges = edges[:, off_diag_idx]
+        # off_diag_idx = np.ravel_multi_index(
+        #     np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+        #     [num_atoms, num_atoms])
+        # edges = edges[:, off_diag_idx]
 
         # data = TensorDataset(feat, edges)
         # data_loader = DataLoader(data, batch_size=batch_size)
         # TODO: we need a way to encode the walls. Maybe add the minmax.
         return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
+
+class NBADataset(data.Dataset):
+    def __init__(self, args, split):
+        self.args = args
+        self.datadir = '/data/Armand/nba-data/npy/'
+        suffix = '_NBA_11'
+        length, sample_freq = 40, 10
+        suffix += '_len{}_sf{}'.format(length, sample_freq)
+
+
+        feat, _, _ = self._load_data(suffix=suffix, split=split)
+
+        assert args.n_objects == feat.shape[1]
+        self.length = feat.shape[0]
+        self.timesteps = args.num_timesteps #feat.shape[2]
+
+        self.feat, self.nothing = feat[:, :, :self.timesteps, :2], np.ones((feat.shape[0],1))
+
+        off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
+        self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
+        self.rel_send = np.array(encode_onehot(np.where(off_diag)[1]), dtype=np.float32)
+
+    def __getitem__(self, index):
+        """Return a data point and its metadata information.
+
+        Parameters:
+            index - - a random integer for data indexing
+        """
+        # if self.datasource == 'default':
+        #     im_corrupt = im + 0.3 * torch.randn(self.image_size, self.image_size, 3)
+        # elif self.datasource == 'random':
+        #     im_corrupt = 0.5 + 0.5 * torch.randn(self.image_size, self.image_size, 3)
+        # else:
+        #     raise NotImplementedError
+        return (torch.tensor(self.feat[index]), torch.tensor(self.nothing[index])), \
+               (torch.tensor(self.rel_rec), torch.tensor(self.rel_send)), index
+
+    def __len__(self):
+        """Return the total number of trajectories in the dataset."""
+        return self.length
+
+    def _load_data(self, suffix='', split='train'):
+        loc = np.load(self.datadir + 'loc_' + split + suffix + '.npy')
+
+        # Note: unnormalize
+
+        loc_max = loc.max()
+        loc_min = loc.min()
+
+        print("Normalized Charged Dataset")
+        # Normalize to [-1, 1]
+        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+
+        # print("Unnormalized Charged Dataset")
+
+        # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
+        # feat = np.transpose(loc, [0, 3, 1, 2])
+
+
+        feat = torch.FloatTensor(loc)
+
+        return feat, None, (loc_max, loc_min) # TODO: Check how mins and maxes are used
+
 
 class TrajnetDataset(data.Dataset):
     def __init__(self, args, split):

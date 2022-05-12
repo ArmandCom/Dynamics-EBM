@@ -9,7 +9,7 @@ import shutil
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from dataset import TrajnetDataset, ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles
-from models import NodeGraphEBM_CNNOneStep_2Streams, EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_CNNOneStep_Light, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep, NodeGraphEBM_CNN# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
+from models import UnConditional, NodeGraphEBM_CNNOneStep_2Streams, EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_CNNOneStep_Light, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep, NodeGraphEBM_CNN# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.optim import Adam, AdamW
@@ -22,9 +22,13 @@ from third_party.utils import visualize_trajectories, get_trajectory_figure, \
     linear_annealing, ReplayBuffer, compress_x_mod, decompress_x_mod, accumulate_traj, \
     normalize_trajectories, augment_trajectories, MMD, align_replayed_batch, get_rel_pairs
 from third_party.utils import create_masks, save_rel_matrices, smooth_trajectory, get_model_grad_norm, get_model_grad_max
+import random
 
 homedir = '/data/Armand/EBM/'
 # port = 6021
+torch.manual_seed(0)
+random.seed(0)
+np.random.seed(0)
 
 """Parse input arguments"""
 parser = argparse.ArgumentParser(description='Train EBM model')
@@ -64,6 +68,8 @@ parser.add_argument('--autoencode', action='store_true', help='if set to True we
 parser.add_argument('--forecast', default=-1, type=int, help='forecast N steps in the future (the encoder only sees the previous). -1 invalidates forecasting')
 parser.add_argument('--cd_and_ae', action='store_true', help='if set to True we use L2 loss and Contrastive Divergence')
 parser.add_argument('--cd_mode', default='', type=str, help='chooses between options for energy-based objectives. zeros: zeroes out some of the latents. mix: mixes latents of other samples in the batch.')
+parser.add_argument('--pred_only', action='store_true', help='Fix points and predict after the K used for training.')
+parser.add_argument('--no_mask', action='store_true', help='No partition of the edges, all processed in one graph.')
 
 # data
 parser.add_argument('--data_workers', default=4, type=int, help='Number of different data workers to load data in parallel')
@@ -72,7 +78,8 @@ parser.add_argument('--trained_models', default=4, type=int, help='use an ensemb
 parser.add_argument('--model_name', default='CNNOS_Node', type=str, help='model name')
 parser.add_argument('--masking_type', default='by_receiver', type=str, help='type of masking in training')
 
-# EBM specific settings
+# Test
+parser.add_argument('--compute_energy', action='store_true', help='Get energies')
 
 # Model specific settings
 parser.add_argument('--filter_dim', default=64, type=int, help='number of filters to use')
@@ -94,6 +101,7 @@ parser.add_argument('--latent_dim', default=64, type=int, help='dimension of the
 parser.add_argument('--obj_id_dim', default=6, type=int, help='size of the object id embedding')
 parser.add_argument('--num_fixed_timesteps', default=5, type=int, help='constraints')
 parser.add_argument('--num_timesteps', default=49, type=int, help='constraints')
+parser.add_argument('--latent_ln', action='store_true', help='layernorm in the latent')
 
 parser.add_argument('--num_steps', default=10, type=int, help='Steps of gradient descent for training')
 parser.add_argument('--num_steps_test', default=40, type=int, help='Steps of gradient descent for training')
@@ -120,6 +128,8 @@ parser.add_argument('--noise_coef', default=0.0, type=float, help='step size of 
 parser.add_argument('--noise_decay_factor', default=1.0, type=float, help='step size of latents')
 parser.add_argument('--ns_iteration_end', default=300000, type=int, help='training iteration where the number of sampling steps reach their max.')
 parser.add_argument('--num_steps_end', default=-1, type=int, help='number of sampling steps')
+
+parser.add_argument('--additional_model', action='store_true', help='Extra unconditional model')
 
 parser.add_argument('--sample', action='store_true', help='generate negative samples through Langevin')
 parser.add_argument('--decoder', action='store_true', help='decoder for model')
@@ -154,22 +164,53 @@ def init_model(FLAGS, device, dataset):
     FLAGS.ensembles = FLAGS.trained_models
 
     # Option 1: All same model
-    model = modelname(FLAGS, dataset).to(device)
-    models = [model for i in range(FLAGS.ensembles)]
+    # model = modelname(FLAGS, dataset).to(device)
+    # models = [model for i in range(n_models)]
 
     # Option 2: All different models
-    # models = [modelname(FLAGS, dataset).to(device) for i in range(FLAGS.ensembles)]
+    # models = [modelname(FLAGS, dataset).to(device) for i in range(n_models))]
 
     # Option 3: Same model per complementary masks, different across latents
-    # models = []
-    # [models.extend([modelname(FLAGS, dataset).to(device)]*2)for i in range(FLAGS.ensembles//2)]
+    models = []
+    [models.extend([modelname(FLAGS, dataset).to(device)]*2)for i in range(n_models//2)]
+
+
+    if FLAGS.additional_model:
+        raise NotImplementedError
 
     FLAGS.ensembles = n_models
     optimizers = [Adam(model.parameters(), lr=FLAGS.lr) for model in models] # Note: From CVR , betas=(0.5, 0.99)
     return models, optimizers
 
+def forward_pass_models(models, feat_in, latent, FLAGS):
+    # Compute energy
+    latent_ii, mask = latent
+    energy = 0
+    curr_latent = latent
+    # Trained models
+    splits = 1 if FLAGS.no_mask else 2
+    for ii in range(splits):
+        for iii in range(FLAGS.trained_models//splits):
+            if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+            else:           curr_latent = (latent_ii[..., iii, :],     mask)
+            if FLAGS.no_mask:
+                energy = models[iii].forward(feat_in, curr_latent) + energy
+            else: energy = models[ii + 2*iii].forward(feat_in, curr_latent) + energy
+        # New models
+    for ii in range(splits):
+        for iii in range(FLAGS.trained_models//splits,
+                         FLAGS.ensembles//splits):
+            if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
+            else:           curr_latent = (latent_ii[..., iii, :],     mask)
+            if FLAGS.no_mask:
+                energy = models[iii].forward(feat_in, curr_latent) + energy
+            else: energy = models[ii + 2*iii].forward(feat_in, curr_latent) + energy
+    # Get grad for current optimization iteration.
+    if FLAGS.additional_model:
+        raise NotImplementedError
+    return energy
+
 def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0, fixed_mask=None):
-    feat_noise = torch.randn_like(feat_neg).detach()
     feat_negs_samples = []
 
     num_fixed_timesteps = FLAGS.num_fixed_timesteps
@@ -187,6 +228,9 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
     old_update = 0.0
 
     feat_negs = [feat_neg]
+    feat_neg = feat_neg[:, :, num_fixed_timesteps:]
+
+    feat_noise = torch.randn_like(feat_neg).detach()
 
     feat_neg.requires_grad_(requires_grad=True) # noise image [b, n_o, T, f]
     feat_fixed = feat.clone() #.requires_grad_(requires_grad=False)
@@ -199,78 +243,48 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
         if FLAGS.num_steps_end != -1 and training_step > 0:
             num_steps = int(linear_annealing(None, training_step, start_step=20000, end_step=FLAGS.ns_iteration_end, start_value=num_steps, end_value=FLAGS.num_steps_end))
 
-    if fixed_mask is None:
-        fixed_mask = torch.zeros_like(feat_neg)
-        if FLAGS.num_fixed_timesteps > 0:
-            fixed_mask[:, :, :num_fixed_timesteps] = 1
-            # #        feat_neg = torch.cat([feat_fixed[:, :, :num_fixed_timesteps],
-            # #                              feat_neg[:, :,  num_fixed_timesteps:]], dim=2)
-            # indices = torch.randint(feat_neg.shape[2]-num_fixed_timesteps+1,
-            #                       (feat_neg.shape[0],))
-            # for fixed_id in range(num_fixed_timesteps):
-            #     indices += fixed_id
-            #     fixed_mask[torch.arange(0,feat_neg.shape[0]), :, indices, :] = 1
-            #     feat_fixed[torch.arange(0,feat_neg.shape[0]), :, indices, :2] += 0.01
-            #     feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
-
     feat_neg_kl = None
 
     for i in range(num_steps):
         feat_noise.normal_()
 
+        if FLAGS.num_fixed_timesteps > 0:
+            feat_in = torch.cat([feat[:, :, :num_fixed_timesteps], feat_neg], dim=2)
+
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
             step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+
         ## Add Noise
         if FLAGS.noise_decay_factor != 1.0:
             noise_coef = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_noise_coef, end_value=FLAGS.step_lr_decay_factor * ini_noise_coef)
-        feat_neg = feat_neg + noise_coef * feat_noise
+        if noise_coef > 0:
+            feat_neg = feat_neg + noise_coef * feat_noise
 
         # Smoothing
         # if i % 5 == 0 and i < num_steps - 1: # smooth every 10 and leave the last iterations
         #     feat_neg = smooth_trajectory(feat_neg, 15, 5.0, 100) # ks, std = 15, 5 # x, kernel_size, std, interp_size
 
         # Compute energy
-        latent_ii, mask = latent
-        energy = 0
-        curr_latent = latent
+        energy = forward_pass_models(models, feat_in, latent, FLAGS)
 
-        # Trained models
-        for ii in range(2):
-            for iii in range(FLAGS.trained_models//2):
-                if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
-                else:           curr_latent = (latent_ii[..., iii, :],     mask)
-                # print('-' ,iii)
-                # print(ii + 2*iii)
-                energy = models[ii + 2*iii].forward(feat_neg, curr_latent) + energy
-        # New models
-        for ii in range(2):
-            for iii in range(FLAGS.trained_models//2,
-                             FLAGS.ensembles//2):
-                if ii == 1:     curr_latent = (latent_ii[..., iii, :], 1 - mask)
-                else:           curr_latent = (latent_ii[..., iii, :],     mask)
-                energy = models[ii + + 2*iii].forward(feat_neg, curr_latent) + energy
         # Get grad for current optimization iteration.
         feat_grad, = torch.autograd.grad([energy.sum()], [feat_neg], create_graph=create_graph)
+
         # feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
 
-        ## Momentum update
-        if FLAGS.momentum > 0:
-            update = FLAGS.step_lr * feat_grad * (1-fixed_mask) + momentum * old_update
-            feat_neg = feat_neg * (1-fixed_mask) - update # GD computation
-            old_update = update
-        else:
-            feat_neg = feat_neg * (1-fixed_mask) - FLAGS.step_lr * feat_grad * (1-fixed_mask) # GD computation
+        feat_neg = feat_neg - FLAGS.step_lr * feat_grad # GD computation
 
-        if num_fixed_timesteps > 0:
-            feat_neg = feat_fixed * (fixed_mask) + feat_neg * (1-fixed_mask)
-
-        feat_neg = torch.clamp(feat_neg, -1, 1)
-        feat_negs.append(feat_neg)
+        feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: put back on
+        if FLAGS.num_fixed_timesteps > 0:
+            feat_out = torch.cat([feat[:, :, :num_fixed_timesteps], feat_neg], dim=2)
+        else: feat_out = feat_neg
+        feat_negs.append(feat_out)
         feat_neg = feat_neg.detach()
         feat_neg.requires_grad_()  # Q: Why detaching and reataching? Is this to avoid backprop through this step?
 
-    return feat_neg, feat_negs, energy, feat_grad
+    return feat_out, feat_negs, energy, feat_grad
+
 
 def sync_model(models): # Q: What is this about?
     size = float(dist.get_world_size())
@@ -286,9 +300,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         dev = torch.device("cpu")
 
     replay_buffer = None
-
+    single_pass = input('Single pass? (y: Yes): ')
+    save = input('Save? (y: Yes, n: No): ')
     print('Begin test:')
     [model.eval() for model in models]
+    energies = []
+    edge_list = []
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
 
         feat = feat.to(dev)
@@ -299,7 +316,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         rel_send = rel_send.to(dev)
         # What are these? im = im[:FLAGS.num_visuals], idx = idx[:FLAGS.num_visuals]
         bs = feat.size(0)
-        # [save_rel_matrices(model, rel_rec, rel_send) for model in models]
+        feat_copy = feat.clone()
+        [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
         b_idx = 12
         b_idx_ref = 10
@@ -307,6 +325,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
         rw_pair = None
         affected_nodes = None
+        fixed_mask = None
 
         ### SELECT BY PAIRS ###
         # pair_id = 2
@@ -321,7 +340,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         # affected_nodes[node_id] = 1
 
         ### Switch examples ###
-        rw_pair = torch.arange(FLAGS.components).to(dev)
+        # rw_pair = torch.arange(FLAGS.components).to(dev)
 
         ### Mask definition
         mask = torch.ones(FLAGS.components).to(dev)
@@ -329,16 +348,19 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             mask[rw_pair] = 0
         # mask = mask * 0
         # mask[rw_pair] = 1
+
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
+        feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
 
         ### NOTE: TEST: Random rotation of the input trajectory
         # feat = normalize_trajectories(feat, augment=False, normalize=True) # We max min normalize the batch
+
+        # TODO: make more efficient --> if mask[mask == 0].sum() == 0 or mask[mask == 1].sum() == 0: # Do only 1 loop
 
         # fixed_idx = 2
         # feat[:, fixed_idx:fixed_idx+1, :, :] = feat[:, fixed_idx:fixed_idx+1, :1, :]
@@ -367,34 +389,92 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
 
             latent = (latent, mask)
 
+            if FLAGS.pred_only:
+                feat = feat[: ,:, -FLAGS.forecast:]
+                nonan_mask = feat == feat
+
             feat_neg = torch.rand_like(feat) * 2 - 1
 
 
             feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                    create_graph=False, fixed_mask=fixed_mask) # TODO: why create_graph
 
-            if save:
+            energy = energy_neg
+
+            if FLAGS.compute_energy:
+                with torch.no_grad():
+                    energy = forward_pass_models(models, feat, latent, FLAGS)
+
+                energies.append(energy)
+                if len(edges.shape) == 4:
+                    edge_list.append(edges[:,-1,:,0])
+
+            if save == 'y': #save:
                 # print('Latents: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
                 # savedir = os.path.join(homedir, "result/%s/") % (FLAGS.exp)
                 # Path(savedir).mkdir(parents=True, exist_ok=True)
                 # savename = "s%08d"% (step)
                 # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
+                if FLAGS.compute_energy:
+                    for i in range(edge_list[0].shape[0]):
+                        if (1-edge_list[-1][i:i+1]).sum() == 2:
+                            b_idx = i
+                            # break
+                    energies = [energies[-1][b_idx:b_idx+1]]
+                    edge_list = [edge_list[-1][b_idx:b_idx+1]]
+                    print('S: {}\nC: {}\nE: {}\nCC: {}'.format((edge_list[-1]*energies[-1]).detach().cpu().numpy(),
+                                                               ((1-edge_list[-1])*energies[-1]).detach().cpu().numpy(),
+                                                               edge_list[-1].detach().cpu().numpy(),
+                                                               'b, r, c, y, k, m, g'))
+                    savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/outlier_detection/')
+                    feat = feat_copy
+
+
                 limpos = limneg = 1
                 if torch.logical_not(nonan_mask).sum() > 0 and lims is None:
                     lims = [-limneg, limpos]
                 elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
                                            feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
                 for i_plt in range(len(feat_negs)):
-                    logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + i_plt + 100*factor_id)
+                    logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + i_plt + 100*factor_id)
                 # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
-                logger.add_figure('test_manip_gen', get_trajectory_figure(feat_negs[-1], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes)[1], step + 100*factor_id)
-                logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step + 100*factor_id)
-                logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gen', get_trajectory_figure(feat_negs[-1], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
                 print('Plotted.')
+
+                if FLAGS.compute_energy:
+                    inp = input('Next: n; or Save with name: ')
+                    if inp is not 'n':
+                        savedir += inp + '_Train-S_Test-C0_S1_'
+                        np.save(savedir + 'edges.npy', edge_list[-1].detach().cpu().numpy())
+                        np.save(savedir + 'energies.npy', energies[-1].detach().cpu().numpy())
+                        np.save(savedir + 'gt_traj_all.npy', feat_copy[b_idx:b_idx+1].detach().cpu().numpy())
+                        np.save(savedir + 'gt_traj_pred.npy', feat[b_idx:b_idx+1].detach().cpu().numpy())
+                        print('All saved in dir {}'.format(savedir))
+                        exit()
+        if single_pass == 'y':
+            break
             # elif logger is not None:
             #     l2_loss = torch.pow(feat_neg_kl[:, :,  FLAGS.num_fixed_timesteps:] - feat[:, :,  FLAGS.num_fixed_timesteps:], 2).mean()
             #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-        break
+        # if not FLAGS.compute_energy:
+
+    if FLAGS.compute_energy:
+        energy = torch.cat(energies, dim=0)
+        if len(edge_list) > 0:
+            edges = torch.cat(edge_list, dim=0)
+            mask_edges = edges == 1
+            # mask_edges = edges == 0
+            # mask_edges = edges == edges # 0 for charged, 1 for springs, edges for all
+        else:
+            mask_edges = energy == energy
+        numelem = mask_edges.sum()
+        if numelem is 0: raise ValueError
+        mean_energy = energy[mask_edges].sum() / numelem
+        std_energy = torch.sqrt(((energy - mean_energy)**2)[mask_edges].sum() / numelem)
+        print('Energy mean and STD:{:.4f} +/- {:.4f}'.format(mean_energy.item(), std_energy.item()))
+
     print('test done')
     exit()
 
@@ -406,18 +486,37 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
 
     [model.eval() for model in models]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
-
+        bs = feat.shape[0]
         feat = feat.to(dev)
         nonan_mask = feat == feat
         feat[torch.logical_not(nonan_mask)] = 10
-        # edges = edges.to(dev)
+        edges = edges.to(dev)
+
+        if step == FLAGS.resume_iter:
+            [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
+            step += 1
+        # Note: If charged-springs edges is of shape [bs, 3, NO, NO]
+        #   3 stands for (edges_spring, edges_charged, edge_selection_mask)
         # rel_rec = rel_rec.to(dev)
         # rel_send = rel_send.to(dev)
+
+        # mask = mask[:feat.shape[0]]
+        if FLAGS.masking_type == 'random':
+            mask = torch.randint(2, (bs, FLAGS.components)).to(dev)
+        elif FLAGS.masking_type == 'ones':
+            mask = torch.ones((bs, FLAGS.components)).to(dev)
+        elif FLAGS.masking_type == 'by_receiver':
+            mask = torch.ones((bs, FLAGS.components)).to(dev)
+            node_ids = torch.randint(FLAGS.n_objects, (bs,))
+            sel_edges = (FLAGS.n_objects - 1)*node_ids
+            for n in range(FLAGS.n_objects-1):
+                mask[torch.arange(0, bs), sel_edges+n] = 0
+        else: raise NotImplementedError
 
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
+        feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=False, normalize=FLAGS.normalize_data_latent)
         # [:, :, FLAGS.num_fixed_timesteps:]
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
@@ -430,9 +529,14 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
         latent = torch.cat([latent, new_latent], dim=-2)
         # Note: not all of it will be used. Last two dimensions are unused.
 
-        feat_neg = torch.rand_like(feat) * 2 - 1
+        if FLAGS.pred_only:
+            feat = feat[: ,:, -FLAGS.forecast:]
+            nonan_mask = feat == feat
 
-        mask=mask[torch.randperm(FLAGS.batch_size)]
+        feat_neg = torch.rand_like(feat) * 2 - 1
+        # feat_neg = feat[:, :, FLAGS.num_fixed_timesteps-1:FLAGS.num_fixed_timesteps, :, ] + \
+        #            torch.randn_like(feat) * 0.01
+
         latent = (latent, mask)
 
         feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
@@ -443,9 +547,9 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
             if torch.logical_not(nonan_mask).sum() > 0:
                 lims = [-limneg, limpos]
             else: lims = None
-            logger.add_figure('test_gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], step)
+            logger.add_figure('test_gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step)
             for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], step + i_plt)
+                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + i_plt)
             # input('a')
             if replay_buffer is not None:
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
@@ -480,7 +584,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     start_time = time.perf_counter()
     for epoch in range(FLAGS.num_epoch):
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
-
+            bs = feat.shape[0]
             loss = 0.0
             feat = feat.to(dev)
             nonan_mask = feat == feat
@@ -488,20 +592,6 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # edges = edges.to(dev)
 
             if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
-
-            #### Note: Opt. 2 ####
-            feat_copy = feat.clone()
-            max_loc = feat[..., :2].abs().max()
-
-            if vel_exists:
-                max_vel = feat[..., 2:].abs().max()
-            else: max_vel = 0
-            # feat_noise = torch.randn_like(feat).detach()
-            # feat_noise.normal_()
-            # feat_noise[..., :2] *= max_loc
-            # feat_noise[..., 2:] *= max_vel
-            # feat = feat + 0.002 * feat_noise
-            #### Note: TEST FEATURE ####
 
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
@@ -522,6 +612,20 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             latent = torch.cat([latent, new_latent], dim=-2) # Note: not all of it will be used. Last two dimensions are unused.
 
+            # Note: only forecast
+            if FLAGS.pred_only:
+                assert FLAGS.forecast > -1
+                feat = feat[: ,:, -FLAGS.forecast:]
+                nonan_mask = feat == feat
+
+
+            # Add noise to original features
+            feat_copy = feat.clone()
+            max_loc = feat[..., :2].abs().max()
+            if vel_exists:
+                max_vel = feat[..., 2:].abs().max()
+            else: max_vel = 0
+
             feat_noise = torch.randn_like(feat).detach()
             feat_noise.normal_()
             feat_noise[..., :2] *= max_loc
@@ -530,9 +634,27 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             latent_norm = latent.norm()
 
+            ### Note: FEATNEG INIT
             feat_neg = torch.rand_like(feat) * 2 - 1
+            # feat_neg = feat[:, :, FLAGS.num_fixed_timesteps-1:FLAGS.num_fixed_timesteps, :] + \
+            #            torch.randn_like(feat) * 0.05
 
-            mask = mask[torch.randperm(FLAGS.batch_size)]
+            # feat_neg_gen = feat_neg
+
+            # mask = mask[torch.randperm(FLAGS.batch_size)]
+
+            if FLAGS.masking_type == 'random':
+                mask = torch.randint(2, (bs, FLAGS.components)).to(dev)
+            elif FLAGS.masking_type == 'ones':
+                mask = torch.ones((bs, FLAGS.components)).to(dev)
+            elif FLAGS.masking_type == 'by_receiver':
+                mask = torch.ones((bs, FLAGS.components)).to(dev)
+                node_ids = torch.randint(FLAGS.n_objects, (bs,))
+                sel_edges = (FLAGS.n_objects - 1)*node_ids
+                for n in range(FLAGS.n_objects-1):
+                    mask[torch.arange(0, bs), sel_edges+n] = 0
+            else: raise NotImplementedError
+
             latent = (latent, mask)
 
             feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps, sample=False, training_step=it)
@@ -540,21 +662,48 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
-            feat_loss = torch.pow(feat_negs[:, -1, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
+            feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
                                   - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
 
-            pow_energy_rec = torch.pow(energy_neg, 2).mean()
+            # pow_energy_rec = torch.pow(energy_neg, 2).mean()
             loss = loss + feat_loss #+ feat_loss_l1
+
+            ### TEST FEATURE ###
+            if FLAGS.cd_and_ae: # and it > 30000:
+                # latent, mask = latent
+
+                # latent_cyc = torch.cat([latent[1:], latent[:1]], dim=0)
+                # latent = latent * mask[:, :, None, None] + latent_cyc * (1-mask)[:, :, None, None]
+                # latent = (latent, mask)
+                # nfts_old = FLAGS.num_fixed_timesteps; FLAGS.num_fixed_timesteps = 0
+                # feat_neg_gen, _, energy_neg_gen, feat_grad_gen = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg_gen, feat, FLAGS.num_steps, sample=False, training_step=it)
+                # FLAGS.num_fixed_timesteps = nfts_old # Set fixed tsteps to old value
+                # energy_neg = energy_neg_gen # Note: Only for logging
+                # ## Energy loss.
+                # energy_loss = energy_neg_gen.mean() + energy_neg.mean() # Normally we would maximize it but here we are supervising with L2
+                # pow_energy_gen = torch.pow(energy_neg_gen, 2).mean()
+                # ## Energy regularization losses
+                # loss = loss + 0.000005 * energy_loss # HARDCODED WEIGHTS!
+                # loss = loss + 0.0001 * (pow_energy_gen + pow_energy_rec)
+
+
+                energy_pos = forward_pass_models(models, feat, latent, FLAGS)
+                energy_neg = forward_pass_models(models, feat_neg.detach(), latent, FLAGS)
+                ml_loss = energy_pos.mean() - energy_neg.mean()
+                pow_energy_rec = (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
+                loss = loss + 1e-4 * (ml_loss + pow_energy_rec)
+
+            else: loss = loss #+ pow_energy_rec
 
             loss_sm = torch.zeros(1).mean()
             loss_kl = torch.zeros(1)
             loss.backward()
 
-            # if it > 30000:
-            #     [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.05) for model in models] # TODO: removed. Must add back?
+            if it > 30000:
+                [torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1) for model in models] # TODO: removed. Must add back?
             if it % FLAGS.log_interval == 0 :# and rank_idx == FLAGS.gpu_rank
-                model_grad_norm = get_model_grad_norm(models)
-                model_grad_max = get_model_grad_max(models)
+                model_grad_norm = get_model_grad_norm(models[-1:])
+                model_grad_max = get_model_grad_max(models[-1:])
 
             [optimizer.step() for optimizer in optimizers]
             [optimizer.zero_grad() for optimizer in optimizers]
@@ -618,10 +767,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 else: lims = None
                 if it % 500 == 0:
                     for i_plt in range(feat_negs.shape[1]):
-                        logger.add_figure('gen', get_trajectory_figure(feat_negs[:, i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it + i_plt)
-                else: logger.add_figure('gen', get_trajectory_figure(feat_neg, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                        logger.add_figure('gen', get_trajectory_figure(feat_negs[:, i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], it + i_plt)
+                else: logger.add_figure('gen', get_trajectory_figure(feat_neg, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], it)
 
-                logger.add_figure('gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr)[1], it)
+                logger.add_figure('gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], it)
                 test(test_dataloader, models, models_ema, FLAGS, mask, step=it, save=False, logger=logger, replay_buffer=replay_buffer_test)
 
                 string += 'Time: %.1fs' % (time.perf_counter()-start_time)
@@ -634,7 +783,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 shutil.copy('models.py', logdir + '/models_EBM_saved.py')
 
             if it % FLAGS.save_interval == 0: #  and rank_idx == FLAGS.gpu_rank
-                mask = create_masks(FLAGS, dev) # Change them once overy log_interval
+                # mask = create_masks(FLAGS, dev) # Change them once overy log_interval
 
                 model_path = osp.join(logdir, "model_{}.pth".format(it))
 
@@ -701,25 +850,6 @@ def main_single(rank, FLAGS):
     device = torch.device('cuda')
 
     branch_folder = 'experiments'
-    # if FLAGS.logname == 'debug':
-    #     logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
-    # else:
-    #     logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.ori_dataset,
-    #                         'NO' +str(FLAGS.n_objects)
-    #                       + '_BS' + str(FLAGS.batch_size)
-    #                       + '_S-LR' + str(FLAGS.step_lr)
-    #                       + '_NS' + str(FLAGS.num_steps)
-    #                       + '_LR' + str(FLAGS.lr)
-    #                       + '_LDim' + str(FLAGS.latent_dim)
-    #                       + '_SN' + str(int(FLAGS.spectral_norm))
-    #                       + '_AE' + str(int(FLAGS.autoencode))
-    #                       + '_FC' + str(FLAGS.forecast)
-    #                       + '_FE' + str(int(FLAGS.factor_encoder))
-    #                       + '_NDL' + str(int(FLAGS.normalize_data_latent))
-    #                       + '_SeqL' + str(int(FLAGS.num_timesteps))
-    #                       + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
-    #     if FLAGS.logname != '':
-    #         logdir += '_' + FLAGS.logname
     FLAGS_OLD = FLAGS
 
     if FLAGS.resume_iter != 0:
@@ -759,8 +889,17 @@ def main_single(rank, FLAGS):
         FLAGS.ns_iteration_end = FLAGS_OLD.ns_iteration_end
         FLAGS.num_steps_end = FLAGS_OLD.num_steps_end
 
-        FLAGS.model_name = FLAGS_OLD.model_name
+
+        # FLAGS.model_name = FLAGS_OLD.model_name
+        FLAGS.no_mask = FLAGS_OLD.no_mask
         FLAGS.masking_type = FLAGS_OLD.masking_type
+        FLAGS.additional_model = FLAGS_OLD.additional_model
+        FLAGS.compute_energy = FLAGS_OLD.compute_energy
+        FLAGS.pred_only = FLAGS_OLD.pred_only
+        # FLAGS.latent_ln = FLAGS_OLD.latent_ln
+        FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
+
+        FLAGS.train = FLAGS_OLD.train
 
         # FLAGS.autoencode = FLAGS_OLD.autoencode
         # FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
@@ -785,8 +924,8 @@ def main_single(rank, FLAGS):
                 for param in model.parameters():
                     param.requires_grad = False
                 print('Model {}/{} loaded and frozen.'.format(idx+1,len(models)))
-            # if idx >= FLAGS.trained_models:
-            #     model.load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
+            if idx >= FLAGS.trained_models:
+                model.load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
                 # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(0)])
 
     else:
@@ -796,26 +935,34 @@ def main_single(rank, FLAGS):
     # TODO: REPEATED CODE, clean.
     branch_folder = 'experiments_incremental'
     if FLAGS.logname == 'debug':
-        logdir = osp.join(FLAGS.logdir, FLAGS.exp, FLAGS.logname)
+        logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.exp, FLAGS.logname)
     else:
         logdir = osp.join(FLAGS.logdir, branch_folder, FLAGS.exp,
                           'NO' +str(FLAGS.n_objects)
                           + '_BS' + str(FLAGS.batch_size)
                           + '_S-LR' + str(FLAGS.step_lr)
                           + '_NS' + str(FLAGS.num_steps)
+                          + '_NSEnd' + str(FLAGS.num_steps_end)
+                          + 'at{}'.format(str(int(FLAGS.ns_iteration_end/1000)) + 'k' if FLAGS.num_steps_end > 0 else '')
                           + '_LR' + str(FLAGS.lr)
                           + '_LDim' + str(FLAGS.latent_dim)
+                          + '{}'.format('LN' if FLAGS.latent_ln else '')
                           + '_SN' + str(int(FLAGS.spectral_norm))
                           + '_AE' + str(int(FLAGS.autoencode))
                           + '_CDAE' + str(int(FLAGS.cd_and_ae))
                           + '_Mod' + str(FLAGS.model_name)
-                          + '_NMod' + str(FLAGS.ensembles//2)
+                          + '_NMod{}'.format(str(FLAGS.ensembles) if FLAGS.no_mask else str(FLAGS.ensembles//2))
+                          + '_NTrMod{}'.format(str(FLAGS.trained_models))
+                          + '{}'.format('+1' if FLAGS.additional_model else '')
                           + '_Mask-' + str(FLAGS.masking_type)
-                          + '_FC' + str(FLAGS.forecast)
+                          + '_NoM' + str(int(FLAGS.no_mask))
                           + '_FE' + str(int(FLAGS.factor_encoder))
                           + '_NDL' + str(int(FLAGS.normalize_data_latent))
                           + '_SeqL' + str(int(FLAGS.num_timesteps))
-                          + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps)))
+                          + '_FSeqL' + str(int(FLAGS.num_fixed_timesteps))
+                          + '_FC' + str(FLAGS.forecast)
+                          + '{}'.format('Only' if FLAGS.pred_only else '')
+                          )
     if FLAGS.logname != '':
         logdir += '_' + FLAGS.logname
     if not osp.exists(logdir):
@@ -830,8 +977,8 @@ def main_single(rank, FLAGS):
     logger = SummaryWriter(logdir)
     it = FLAGS.resume_iter
 
-    mask = create_masks(FLAGS, torch.device("cuda"))
-
+    # mask = create_masks(FLAGS, torch.device("cuda"))
+    mask = None
     if FLAGS.train:
         models = [model.train() for model in models]
     else:
@@ -843,14 +990,16 @@ def main_single(rank, FLAGS):
     elif FLAGS.test_manipulate:
         test_manipulate(test_manipulate_dataloader, models, models_ema, FLAGS, step=FLAGS.resume_iter, save=True, logger=logger)
     else:
-        test(test_dataloader, models, models_ema, FLAGS, mask, step=FLAGS.resume_iter)
+        test(test_dataloader, models, models_ema, FLAGS, mask, step=FLAGS.resume_iter, save=False, logger=logger)
 
 
 def main():
     FLAGS = parser.parse_args()
+    if FLAGS.no_mask: FLAGS.masking_type = 'ones'
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
-    FLAGS.ensembles = FLAGS.trained_models + 2
-    FLAGS.tie_weight = True
+    # n_new_models = 1 if FLAGS.no_mask else 2
+    # FLAGS.ensembles = FLAGS.trained_models + n_new_models
+    # FLAGS.tie_weight = True
     FLAGS.sample = True
     FLAGS.exp = FLAGS.exp + FLAGS.dataset
     logdir = osp.join(FLAGS.logdir, 'experiments', FLAGS.exp)

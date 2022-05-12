@@ -424,30 +424,32 @@ def normalize_trajectories(state, augment=False, normalize=True):
         else: state = loc
     return state
 
-def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None):
+def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None,args = None):
     fig = plt.figure()
     axes = plt.gca()
     lw = 1.5
-    sz_pt = 20
-    maps = ['afmhot', 'cool', 'Wistia', 'YlGnBu'] #https://matplotlib.org/2.0.2/examples/color/colormaps_reference.html
-    cmap = maps[2]
-    alpha = 0.8
+    sz_pt = 30
+    maps = ['bone', 'magma', 'spring', 'autumn', 'gist_gray', 'afmhot', 'cool', 'Wistia', 'YlGnBu'] #https://matplotlib.org/2.0.2/examples/color/colormaps_reference.html
+    cmap = maps[4]
+    alpha = 0.6
     if lims is not None:
         axes.set_xlim([lims[0], lims[1]])
         axes.set_ylim([lims[0], lims[1]])
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
     # vel_norm = np.sqrt((vel ** 2).sum(axis=1))
-    colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g']
+    colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g', 'aquamarine', 'tab:brown', 'tab:purple', 'tab:pink']
     if highlight_nodes is not None:
-        modes = ['-' if node == 0 else '--' for node in highlight_nodes]
+        modes = ['-' if node == 0 else ':' for node in highlight_nodes]
         assert len(modes) == loc.shape[-1]
     else: modes = ['-']*loc.shape[-1]
     if plot_type == 'loc' or plot_type == 'both':
         for i in range(loc.shape[-1]):
-            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i], modes[i], c=colors[i], linewidth=lw)
-            # plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
             plt.scatter(loc[0, :, 0, i], loc[0, :, 1, i], s=sz_pt, c=np.arange(loc.shape[1]), cmap=cmap, alpha=alpha)
+            plt.plot(loc[0, :, 0, i], loc[0, :, 1, i], modes[i], c=colors[i], linewidth=lw)
+            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'o', c=colors[i])
+            # if args.forecast > -1:
+            #     plt.plot(loc[0, -args.forecast, 0, i], loc[0, -args.forecast, 1, i], 'x', c=colors[i])
         pass
     if plot_type == 'vel' or plot_type == 'both':
         for i in range(loc.shape[-1]):
@@ -456,9 +458,11 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
             for t in range(loc.shape[1] - 1):
                 acc_pos = np.concatenate([acc_pos[0], acc_pos[0][t:t+1]+vels[0][t:t+1]]), \
                           np.concatenate([acc_pos[1], acc_pos[1][t:t+1]+vels[1][t:t+1]])
+            plt.scatter(acc_pos[0], acc_pos[1], s=sz_pt, c=np.arange(loc.shape[1]), cmap=cmap, alpha=alpha)
             plt.plot(acc_pos[0], acc_pos[1], modes[i], c=colors[i], linewidth=lw)
-            # plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'd')
-            plt.scatter(loc[0, :, 0, i], loc[0, :, 1, i], s=sz_pt, c=np.arange(loc.shape[1]), cmap=cmap, alpha=alpha)
+            plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'o', c=colors[i])
+            # if args.forecast > -1:
+            #     plt.plot(loc[0, -args.forecast, 0, i], loc[0, -args.forecast, 1, i], 'x', c=colors[i])
     return plt, fig
 
 def accumulate_traj(states):
@@ -486,8 +490,12 @@ def get_rel_pairs(rel_send, rel_rec):
     return group_list
 
 def save_rel_matrices(model, rel_rec, rel_send):
-    if model.rel_rec is None and model.rel_send is None:
-        model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
+    if isinstance(model, nn.DataParallel):
+        if model.module.rel_rec is None:
+            model.module.rel_rec, model.module.rel_send = rel_rec[0:1], rel_send[0:1]
+    elif model.rel_rec is None: model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
+# def save_rel_matrices(model, rel_rec, rel_send):
+#     if model.rel_rec is None: model.rel_rec, model.rel_send = rel_rec[0:1], rel_send[0:1]
 
 def gaussian_fn(M, std):
     n = torch.arange(0, M) - (M - 1.0) / 2.0
