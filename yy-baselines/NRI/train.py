@@ -12,6 +12,7 @@ from torch.optim import lr_scheduler
 
 from utils import *
 from modules import *
+os.environ['CUDA_VISIBLE_DEVICES']='2'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -62,7 +63,7 @@ parser.add_argument('--gamma', type=float, default=0.5,
                     help='LR decay factor.')
 parser.add_argument('--skip-first', action='store_true', default=False,
                     help='Skip first edge type in decoder, i.e. it represents no-edge.')
-parser.add_argument('--var', type=float, default=5e-5,
+parser.add_argument('--var', type=float, default=5e-5, #default=5e-5,
                     help='Output variance.')
 parser.add_argument('--hard', action='store_true', default=False,
                     help='Uses discrete samples in training forward pass.')
@@ -89,9 +90,8 @@ if args.save_folder:
     exp_counter = 0
     now = datetime.datetime.now()
     timestamp = now.isoformat()
-    save_folder = os.getcwd()+'/{}/exp{}/'.format(args.save_folder, timestamp)
-    os.mkdir(save_folder)
-
+    save_folder = os.getcwd()+'/{}/exp{}/'.format(args.save_folder, timestamp); os.mkdir(save_folder)
+    print('Save Folder: {}'.format( save_folder))
     meta_file = os.path.join(save_folder, 'metadata.pkl')
     encoder_file = os.path.join(save_folder, 'encoder.pt')
     decoder_file = os.path.join(save_folder, 'decoder.pt')
@@ -103,6 +103,7 @@ if args.save_folder:
 else:
     print("WARNING: No save_folder provided!" +
           "Testing (within this script) will throw an error.")
+
 
 # off_diag = np.ones([args.num_atoms, args.num_atoms]) - np.eye(args.num_atoms)
 #
@@ -121,7 +122,7 @@ rel_rec = torch.FloatTensor(rel_rec)
 rel_send = torch.FloatTensor(rel_send)
 
 if args.encoder == 'mlp':
-    encoder = MLPEncoder(args.timesteps * args.dims, args.encoder_hidden,
+    encoder = MLPEncoder((args.timesteps - args.prediction_steps) * args.dims, args.encoder_hidden,
                          args.edge_types,
                          args.encoder_dropout, args.factor)
 elif args.encoder == 'cnn':
@@ -147,6 +148,7 @@ elif args.decoder == 'sim':
     decoder = SimulationDecoder(loc_max, loc_min, vel_max, vel_min, args.suffix)
 
 if args.load_folder:
+    args.load_folder = os.getcwd()+'/{}/{}/'.format(args.save_folder, args.load_folder)
     encoder_file = os.path.join(args.load_folder, 'encoder.pt')
     encoder.load_state_dict(torch.load(encoder_file))
     decoder_file = os.path.join(args.load_folder, 'decoder.pt')
@@ -204,11 +206,11 @@ def train(epoch, best_val_loss):
         data, relations = Variable(data), Variable(relations)
 
         optimizer.zero_grad()
-
-        logits = encoder(data, rel_rec, rel_send) # [128, 20, n_classes 2]
+        # print('iter')
+        logits = encoder(data[:, :, :args.timesteps - args.prediction_steps].clone(), rel_rec, rel_send) # [128, 20, n_classes 2]
         edges = gumbel_softmax(logits, tau=args.temp, hard=args.hard)
         prob = my_softmax(logits, -1)
-
+        # print('encoded')
         if args.decoder == 'rnn':
             output = decoder(data, edges, rel_rec, rel_send, 100,
                              burn_in=True,
@@ -216,6 +218,8 @@ def train(epoch, best_val_loss):
         else:
             output = decoder(data, edges, rel_rec, rel_send,
                              args.prediction_steps)
+
+        # print('decoded')
 
         target = data[:, :, 1:, :]
 
@@ -235,9 +239,14 @@ def train(epoch, best_val_loss):
         loss.backward()
         optimizer.step()
 
-        mse_train.append(F.mse_loss(output, target).item())
-        nll_train.append(loss_nll.item())
-        kl_train.append(loss_kl.item())
+        try:
+            mse_train.append(F.mse_loss(output, target).data[0])
+            nll_train.append(loss_nll.data[0])
+            kl_train.append(loss_kl.data[0])
+        except:
+            mse_train.append(F.mse_loss(output, target).item())
+            nll_train.append(loss_nll.item())
+            kl_train.append(loss_kl.item())
 
     nll_val = []
     acc_val = []
@@ -252,7 +261,7 @@ def train(epoch, best_val_loss):
         data, relations = Variable(data, volatile=True), Variable(
             relations, volatile=True)
 
-        logits = encoder(data, rel_rec, rel_send)
+        logits = encoder(data[:, :, :args.timesteps - args.prediction_steps].clone(), rel_rec, rel_send)
         edges = gumbel_softmax(logits, tau=args.temp, hard=True)
         prob = my_softmax(logits, -1)
 
@@ -266,9 +275,14 @@ def train(epoch, best_val_loss):
         acc = edge_accuracy(logits, relations)
         acc_val.append(acc)
 
-        mse_val.append(F.mse_loss(output, target).item())
-        nll_val.append(loss_nll.item())
-        kl_val.append(loss_kl.item())
+        try:
+            mse_val.append(F.mse_loss(output, target).data[0])
+            nll_val.append(loss_nll.data[0])
+            kl_val.append(loss_kl.data[0])
+        except:
+            mse_val.append(F.mse_loss(output, target).item())
+            nll_val.append(loss_nll.item())
+            kl_val.append(loss_kl.item())
 
     print('Epoch: {:04d}'.format(epoch),
           'nll_train: {:.10f}'.format(np.mean(nll_train)),
@@ -316,10 +330,10 @@ def test():
         data, relations = Variable(data, volatile=True), Variable(
             relations, volatile=True)
 
-        assert (data.size(2) - args.timesteps) >= args.timesteps
+        assert data.size(2) >= args.timesteps
 
-        data_encoder = data[:, :, :args.timesteps, :].contiguous()
-        data_decoder = data[:, :, -args.timesteps:, :].contiguous()
+        data_encoder = data[:, :, :args.timesteps-args.prediction_steps, :].contiguous()
+        data_decoder = data[:, :, -args.prediction_steps:, :].contiguous() # TODO: Modified: first it was
 
         logits = encoder(data_encoder, rel_rec, rel_send)
         edges = gumbel_softmax(logits, tau=args.temp, hard=True)
@@ -335,9 +349,14 @@ def test():
         acc = edge_accuracy(logits, relations)
         acc_test.append(acc)
 
-        mse_test.append(F.mse_loss(output, target).item())
-        nll_test.append(loss_nll.item())
-        kl_test.append(loss_kl.item())
+        try:
+            mse_test.append(F.mse_loss(output, target).data[0])
+            nll_test.append(loss_nll.data[0])
+            kl_test.append(loss_kl.data[0])
+        except:
+            mse_test.append(F.mse_loss(output, target).item())
+            nll_test.append(loss_nll.item())
+            kl_test.append(loss_kl.item())
 
         # For plotting purposes
         if args.decoder == 'rnn':
@@ -403,7 +422,7 @@ print("Best Epoch: {:04d}".format(best_epoch))
 if args.save_folder:
     print("Best Epoch: {:04d}".format(best_epoch), file=log)
     log.flush()
-
+best_epoch = 137
 test()
 if log is not None:
     print(save_folder)

@@ -114,19 +114,28 @@ def binary_accuracy(output, labels):
     correct = correct.sum()
     return correct / len(labels)
 
-
 def load_data(batch_size=1, suffix=''):
     data_root = '/data/Armand/NRI'
+
+    dset = suffix[1:-1]
+    if dset == 'springs':
+        suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
+    elif dset == 'charged':
+        suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
+    elif dset == 'charged-springs':
+        suffix += 'inter_s0.1_c0.5_sf50_lentrain5000_nstrain50000_mixedbynode'
+    else: raise NotImplementedError
+
     loc_train = np.load(data_root + '/loc_train' + suffix + '.npy')
-    vel_train = np.load(data_root + '/vel_train' + suffix + '.npy')
+    vel_train = np.load(data_root + '/vel_train' + suffix + '.npy') / 20
     edges_train = np.load(data_root + '/edges_train' + suffix + '.npy')
 
     loc_valid = np.load(data_root + '/loc_valid' + suffix + '.npy')
-    vel_valid = np.load(data_root + '/vel_valid' + suffix + '.npy')
+    vel_valid = np.load(data_root + '/vel_valid' + suffix + '.npy') / 20
     edges_valid = np.load(data_root + '/edges_valid' + suffix + '.npy')
 
     loc_test = np.load(data_root + '/loc_test' + suffix + '.npy')
-    vel_test = np.load(data_root + '/vel_test' + suffix + '.npy')
+    vel_test = np.load(data_root + '/vel_test' + suffix + '.npy') / 20
     edges_test = np.load(data_root + '/edges_test' + suffix + '.npy')
 
     # [num_samples, num_timesteps, num_dims, num_atoms]
@@ -137,15 +146,23 @@ def load_data(batch_size=1, suffix=''):
     vel_max = vel_train.max()
     vel_min = vel_train.min()
 
+    loc_max_test = loc_test.max()
+    loc_min_test = loc_test.min()
+    loc_max_val = loc_valid.max()
+    loc_min_val = loc_valid.min()
+
     # Normalize to [-1, 1]
     loc_train = (loc_train - loc_min) * 2 / (loc_max - loc_min) - 1
-    vel_train = (vel_train - vel_min) * 2 / (vel_max - vel_min) - 1
+    vel_train = vel_train * 2 / (loc_max - loc_min)
+    # vel_train = (vel_train - vel_min) * 2 / (vel_max - vel_min) - 1
 
     loc_valid = (loc_valid - loc_min) * 2 / (loc_max - loc_min) - 1
-    vel_valid = (vel_valid - vel_min) * 2 / (vel_max - vel_min) - 1
+    vel_valid = (vel_valid) * 2 / (loc_max_val - loc_min_val) - 1
+    # vel_valid = (vel_valid - vel_min) * 2 / (vel_max - vel_min) - 1
 
     loc_test = (loc_test - loc_min) * 2 / (loc_max - loc_min) - 1
-    vel_test = (vel_test - vel_min) * 2 / (vel_max - vel_min) - 1
+    vel_test = (vel_test) * 2 / (loc_max_test - loc_min_test) - 1
+    # vel_test = (vel_test - vel_min) * 2 / (vel_max - vel_min) - 1
 
     # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
     loc_train = np.transpose(loc_train, [0, 3, 1, 2])
