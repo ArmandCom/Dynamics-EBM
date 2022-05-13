@@ -629,10 +629,15 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
+            # TODO: for nba maybe we don't need to supervize the ball
             # feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
             #                       - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
-            feat_loss = torch.pow(feat_neg[nonan_mask]
-                                  - feat[nonan_mask], 2).mean()
+            if FLAGS.dataset != 'nba':
+                feat_loss = torch.pow(feat_neg[nonan_mask]
+                                      - feat[nonan_mask], 2).mean()
+            else:
+                feat_loss = torch.pow(feat_neg[:, 1:][nonan_mask[:, 1:]]
+                                      - feat[:, 1:][nonan_mask[:, 1:]], 2).mean()
 
 
             # pow_energy_rec = torch.pow(energy_neg, 2).mean()

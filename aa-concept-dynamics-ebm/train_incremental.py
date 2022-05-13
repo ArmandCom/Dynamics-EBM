@@ -924,8 +924,8 @@ def main_single(rank, FLAGS):
                 for param in model.parameters():
                     param.requires_grad = False
                 print('Model {}/{} loaded and frozen.'.format(idx+1,len(models)))
-            if idx >= FLAGS.trained_models:
-                model.load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
+            # if idx >= FLAGS.trained_models:
+            #     model.load_state_dict(checkpoint['model_state_dict_{}'.format(0)], strict=False)
                 # optimizer.load_state_dict(checkpoint['optimizer_state_dict_{}'.format(0)])
 
     else:

@@ -404,14 +404,14 @@ class ChargedParticles(data.Dataset):
         # self.sample_freq = args.sample_freq # default: 100
         # self.sequence_length = args.sequence_length # default: 1000
 
-        print('-Randomly placed trajectory.')
-        ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
-        batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
-        ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
-        self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
+        # print('-Randomly placed trajectory.')
+        # ini_id = np.random.randint(0, feat.shape[2]-self.timesteps, (feat.shape[0],))[:, None].repeat(self.timesteps, 1)
+        # batch_id = np.arange(0, feat.shape[0])[:, None].repeat(self.timesteps, 1)
+        # ini_id += np.arange(0,self.timesteps)[None].repeat(feat.shape[0], 0)
+        # self.feat, self.edges = np.transpose(feat[batch_id, :, ini_id],(0,2,1,3)), edges
 
-        # print('-Trajectory begins at start.')
-        # self.feat, self.edges = feat[:, :, :self.timesteps], edges
+        print('-Trajectory begins at start.')
+        self.feat, self.edges = feat[:, :, :self.timesteps], edges
 
         off_diag = np.ones([args.n_objects, args.n_objects]) - np.eye(args.n_objects)
         self.rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
@@ -565,7 +565,7 @@ class ChargedSpringsParticles(data.Dataset):
 
         loc_max = loc.max()
         loc_min = loc.min()
-        vel = vel / 10
+        vel = vel / 20
         # Note: In simulation our increase in T (delta T) is 0.001.
         #  Then we sample 1/10 generated samples.
         #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
@@ -607,9 +607,9 @@ class ChargedSpringsParticles(data.Dataset):
 class NBADataset(data.Dataset):
     def __init__(self, args, split):
         self.args = args
-        self.datadir = '/data/Armand/nba-data/npy/'
+        self.datadir = '/data/Armand/nba-data-large/npy/'
         suffix = '_NBA_11'
-        length, sample_freq = 40, 10
+        length, sample_freq = 100, 1 # 60, 10
         suffix += '_len{}_sf{}'.format(length, sample_freq)
 
 
@@ -645,7 +645,7 @@ class NBADataset(data.Dataset):
         return self.length
 
     def _load_data(self, suffix='', split='train'):
-        loc = np.load(self.datadir + 'loc_' + split + suffix + '.npy')
+        loc = np.load(self.datadir + 'loc_' + split + suffix + '.npy')[..., :2]
 
         # Note: unnormalize
 
@@ -654,7 +654,12 @@ class NBADataset(data.Dataset):
 
         print("Normalized Charged Dataset")
         # Normalize to [-1, 1]
-        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        feat = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        if self.args.input_dim == 4:
+            vel = np.zeros_like(feat)
+            vel[:, :, :-1] = feat[:, :, 1:] - feat[:, :, :-1]
+            vel[:, :, -1] = np.nan
+            feat = np.concatenate([loc, vel], -1)
 
         # print("Unnormalized Charged Dataset")
 
@@ -662,10 +667,9 @@ class NBADataset(data.Dataset):
         # feat = np.transpose(loc, [0, 3, 1, 2])
 
 
-        feat = torch.FloatTensor(loc)
+        feat = torch.FloatTensor(feat)
 
         return feat, None, (loc_max, loc_min) # TODO: Check how mins and maxes are used
-
 
 class TrajnetDataset(data.Dataset):
     def __init__(self, args, split):

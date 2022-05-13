@@ -438,7 +438,14 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
     state = state[b_idx].permute(1, 2, 0).cpu().detach().numpy()
     loc, vel = state[:, :2][None], state[:, 2:][None]
     # vel_norm = np.sqrt((vel ** 2).sum(axis=1))
-    colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g', 'aquamarine', 'tab:brown', 'tab:purple', 'tab:pink']
+
+    if args.dataset == 'nba':
+        colors = ['r',
+                  (51,35,255), (108,97,255), (153,145,255), (202,197,255), (245,200,255),
+                  (141,144,21),(157,160,43), (180,183,36),  (201,204,58), (219,226,71)]
+    else:
+        colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g', 'aquamarine', 'tab:brown', 'tab:purple', 'tab:pink']
+
     if highlight_nodes is not None:
         modes = ['-' if node == 0 else ':' for node in highlight_nodes]
         assert len(modes) == loc.shape[-1]

@@ -622,6 +622,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
     start_time = time.perf_counter()
     for epoch in range(FLAGS.num_epoch):
+        print('Epoch {}\n'.format(epoch))
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
             bs = feat.shape[0]
             loss = 0.0
