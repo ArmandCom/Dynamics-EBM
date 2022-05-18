@@ -474,7 +474,6 @@ class NodeGraphEBM_CNN(nn.Module):
         state_dim = args.input_dim
         kernel_size = 5
         self.skip_con = True
-
         self.obj_id_embedding = args.obj_id_embedding
         if args.obj_id_embedding:
             state_dim += args.obj_id_dim
@@ -1648,15 +1647,23 @@ class NodeID(nn.Module):
     def __init__(self, args):
         super(NodeID, self).__init__()
         self.obj_id_dim = args.obj_id_dim
+        self.args = args
         # dim_id = int(np.ceil(np.log2(args.n_objects)))
         self.index_embedding = nn.Embedding(args.n_objects, args.obj_id_dim)
         # obj_ids = [torch.tensor(np.array(list(np.binary_repr(i, width=dim_id)), dtype=int)) for i in range(args.n_objects)]
         # obj_ids = torch.stack(obj_ids)
         obj_ids = torch.arange(args.n_objects)
+        if self.args.dataset == 'nba' and self.obj_id_dim == 1:
+            obj_ids[:1] = -1
+            obj_ids[1:6] = 0
+            obj_ids[6:] = 1
         self.register_buffer('obj_ids', obj_ids, persistent=False)
 
     def forward(self, states):
-        embeddings = self.index_embedding(self.obj_ids)[None, :, None].expand(*states.shape[:-1], self.obj_id_dim)
+        if self.args.dataset == 'nba' and self.obj_id_dim == 1:
+            embeddings = self.obj_ids[None, :, None, None].expand(*states.shape[:-1], self.obj_id_dim)
+        else:
+            embeddings = self.index_embedding(self.obj_ids)[None, :, None].expand(*states.shape[:-1], self.obj_id_dim)
         return torch.cat([states, embeddings], dim=-1)
 
 # Support Modules

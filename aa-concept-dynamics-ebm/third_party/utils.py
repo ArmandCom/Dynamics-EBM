@@ -424,7 +424,7 @@ def normalize_trajectories(state, augment=False, normalize=True):
         else: state = loc
     return state
 
-def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None,args = None):
+def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_nodes = None,args = None,grads=None,grad_id=None):
     fig = plt.figure()
     axes = plt.gca()
     lw = 1.5
@@ -441,8 +441,9 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
 
     if args.dataset == 'nba':
         colors = ['r',
-                  (51,35,255), (108,97,255), (153,145,255), (202,197,255), (245,200,255),
-                  (141,144,21),(157,160,43), (180,183,36),  (201,204,58), (219,226,71)]
+                  (51/255,35/255,1), (108/255,97/255,1), (153/255,145/255,1), (202/255,197/255,1), (245/255,200/255,1),
+                  (141/255,144/255,21/255),(157/255,160/255,43/255), (180/255,183/255,36/255),  (201/255,204/255,58/255), (219/255,226/255,71/255)]
+
     else:
         colors = ['b', 'r', 'c', 'y', 'k', 'm', 'g', 'aquamarine', 'tab:brown', 'tab:purple', 'tab:pink']
 
@@ -470,6 +471,16 @@ def get_trajectory_figure(state, b_idx, lims=None, plot_type ='loc', highlight_n
             plt.plot(loc[0, 0, 0, i], loc[0, 0, 1, i], 'o', c=colors[i])
             # if args.forecast > -1:
             #     plt.plot(loc[0, -args.forecast, 0, i], loc[0, -args.forecast, 1, i], 'x', c=colors[i])
+    if grads is not None:
+        grads = grads[b_idx].permute(1, 2, 0).cpu().detach().numpy()[None]
+        for i in range(1, loc.shape[-1]):
+            if grad_id is not None:
+                if i != grad_id: continue
+            Q = plt.quiver(loc[0, args.num_fixed_timesteps:, 0, i], loc[0, args.num_fixed_timesteps:, 1, i],
+                           grads[0, args.num_fixed_timesteps:, 0, i], grads[0, args.num_fixed_timesteps:, 0, i],
+                           [(grads[0, args.num_fixed_timesteps:, 0, i]**2 + grads[0, args.num_fixed_timesteps:, 1, i]**2)**0.5],
+                           angles = 'xy', width=0.001*lw)
+
     return plt, fig
 
 def accumulate_traj(states):

@@ -14,11 +14,11 @@ parser.add_argument('--num-valid', type=int, default=1000,
 					help='Number of validation simulations to generate.')
 parser.add_argument('--num-test', type=int, default=1000,
 					help='Number of test simulations to generate.')
-parser.add_argument('--length', type=int, default=40,
+parser.add_argument('--length', type=int, default=100,
 					help='Length of trajectory after subsampling.')
 parser.add_argument('--length-test', type=int, default=5000,
 					help='Length of test set trajectory.')
-parser.add_argument('--sample-freq', type=int, default=10,
+parser.add_argument('--sample-freq', type=int, default=2,
 					help='How often to sample the trajectory.')
 # parser.add_argument('--n-balls', type=int, default=3,
 # 					help='Number of balls in the simulation.')
@@ -32,7 +32,7 @@ np.random.seed(args.seed)
 
 print(suffix)
 
-datadir = '/data/Armand/nba-data/npy/'
+datadir = '/data/Armand/nba-data-large/npy/'
 def generate_dataset(num_sims, length, sample_freq):
 	loc_all = list()
 	vel_all = list()
@@ -60,6 +60,8 @@ def generate_dataset(num_sims, length, sample_freq):
 				splits.append(loc_array)
 				num_sims_count += 1
 				count = 0
+				loc_all = []
+				print('Filled split #{}.'.format(num_sims_count))
 				break
 		if num_sims_count > 2: break
 	return splits
@@ -68,13 +70,17 @@ print("Generating {},{},{} simulations".format(args.num_train, args.num_valid, a
 loc_train, loc_valid, loc_test = generate_dataset( [args.num_train, args.num_valid, args.num_test],
 													 args.length,
 													 args.sample_freq)
-
+#
 suffix += '_len{}_sf{}'.format(args.length, args.sample_freq)
 # '_{}sims.npy'.format(args.num_train)
+print(loc_train.shape)
+print(loc_valid.shape)
+print(loc_test.shape)
 np.save(datadir + 'loc_train' + suffix + '.npy', loc_train)
 np.save(datadir + 'loc_valid' + suffix + '.npy', loc_valid)
 np.save(datadir + 'loc_test' + suffix + '.npy', loc_test)
 
+print(datadir + 'loc_train' + suffix + '.npy')
 
 # import matplotlib.pyplot as plt
 # def visualize_trajectories(list, list_idx=0, len=50, sr=5):

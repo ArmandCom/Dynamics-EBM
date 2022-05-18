@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-from dataset import TrajnetDataset, ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles
+from dataset import NBADataset, TrajnetDataset, ChargedParticlesSim, ChargedParticles, ChargedSpringsParticles, SpringsParticles
 from models import UnConditional, NodeGraphEBM_CNNOneStep_2Streams, EdgeGraphEBM_OneStep, EdgeGraphEBM_CNNOneStep, EdgeGraphEBM_CNNOneStep_Light, EdgeGraphEBM_CNN_OS_noF, NodeGraphEBM_CNNOneStep, NodeGraphEBM_CNN# TrajGraphEBM, EdgeGraphEBM, LatentEBM, ToyEBM, BetaVAE_H, LatentEBM128
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -136,7 +136,6 @@ parser.add_argument('--nodes', default=1, type=int, help='number of nodes for tr
 parser.add_argument('--gpus', default=1, type=int, help='number of gpus per nodes')
 parser.add_argument('--node_rank', default=0, type=int, help='rank of node')
 parser.add_argument('--gpu_rank', default=0, type=int, help='number of gpus per nodes')
-
 # python train.py --num_steps=3 --num_steps_test 5 --step_lr=10.0 --dataset=trajnet_orca_five_synth --cuda --train --batch_size=24 --latent_dim=8 --data_workers=4 --gpus=1 --gpu_rank 1 --normalize_data_latent --num_fixed_timesteps 1 --autoencode --logname cnnosNodek3 --n_objects 5 --factor --num_timesteps 21 --spectral_norm --input_dim 2
 
 def init_model(FLAGS, device, dataset):
@@ -187,7 +186,29 @@ def forward_pass_models(models, feat_in, latent, FLAGS):
             else: energy = models[ii + 2*iii].forward(feat_in, curr_latent) + energy
     if FLAGS.additional_model:
         energy = models[-1].forward(feat_in) + energy
+    # print('energy_before', energy.mean())
+    # energy = new_constraint('repel_origin', feat_in, energy)
     return energy
+
+# def new_constraint(type, feat_neg, energy):
+#     if type == 'repel_origin':
+#         # energy = 0# - 0.05*((((feat_neg[...,1:, :1])**2 +
+#                             # (feat_neg[...,1:, 1:2])**2)**(0.5))**(-1)).mean()
+#
+#         energy_add = ((((feat_neg[..., 3:])**2 +
+#                         (feat_neg[..., 2:3])**2)**(0.5))**(-1))[..., 0].mean(-1)
+#         energy_add = -2e-8 * energy_add/energy.norm().detach()
+#         print('mean', energy_add.mean())
+#         print('max', energy_add.max())
+#
+#         # energy =  0.005*((((feat_neg[..., :1])**2 +
+#         #                    (feat_neg[..., 1:2])**2)**(0.5))**(-1)).mean()
+#
+#         # energy = energy + 2*((feat_neg[...,:1, :2]-feat_neg[...,1:, :2])**2).mean()
+#         # energy = energy + 0.2*((feat_neg[...,:-1, :2]-feat_neg[...,1:, :2])**2).mean()
+#     print(energy_add.mean())
+#     energy = energy + energy_add
+#     return energy
 
 def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0, fixed_mask=None):
     feat_negs_samples = []
@@ -368,7 +389,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         feat_copy = feat.clone()
         [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
-        b_idx = 1
+        b_idx = 5
         b_idx_ref = 3
 
         rw_pair = None
@@ -437,11 +458,10 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             latent = (latent, mask)
 
             if FLAGS.pred_only:
-                feat = feat[: ,:, -FLAGS.forecast:]
+                feat = feat[: ,:, -FLAGS.forecast:] #[: ,:, -FLAGS.forecast:]
                 nonan_mask = feat == feat
 
             feat_neg = torch.rand_like(feat) * 2 - 1
-
 
             feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                    create_graph=False, fixed_mask=fixed_mask) # TODO: why create_graph
@@ -481,7 +501,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 if torch.logical_not(nonan_mask).sum() > 0 and lims is None:
                     lims = [-limneg, limpos]
                 elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
-                                           feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
+                                          feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
                 for i_plt in range(len(feat_negs)):
                     logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + i_plt + 100*factor_id)
                 # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
@@ -531,6 +551,7 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
     else:
         dev = torch.device("cpu")
 
+    mse = []
     [model.eval() for model in models]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
         bs = feat.shape[0]
@@ -576,34 +597,41 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
         feat_neg = torch.rand_like(feat) * 2 - 1
         # feat_neg = feat[:, :, FLAGS.num_fixed_timesteps-1:FLAGS.num_fixed_timesteps, :, ] + \
         #            torch.randn_like(feat) * 0.01
-
         latent = (latent, mask)
 
         feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                 create_graph=False) # TODO: why create_graph
-
+        # print(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
+        #            feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]), feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:].shape)
+        notpred = 19
+        if notpred != 0:
+            mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred],
+                       feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred]))
+        else:             mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
+                                                feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]))
+        # save = True
         if save:
             limpos = limneg = 1
             if torch.logical_not(nonan_mask).sum() > 0:
                 lims = [-limneg, limpos]
             else: lims = None
-            logger.add_figure('test_gt', get_trajectory_figure(feat, lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step)
+            logger.add_figure('test_gt_real', get_trajectory_figure(feat, lims=lims, b_idx=1, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step)
             for i_plt in range(len(feat_negs)):
-                logger.add_figure('test_gen', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=0, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + i_plt)
+                logger.add_figure('test_gen_gt_real', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=1, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + i_plt)
             if replay_buffer is not None:
                 replay_buffer_path = osp.join(logger.log_dir, "rb.pt")
                 torch.save(replay_buffer, replay_buffer_path)
             # print('Masks: {}'.format( latent[1][0].detach().cpu().numpy()))
             if latent[0] is not None:
                 print('Latents: \n{}'.format( latent[0][0,...,0].detach().cpu().numpy()))
-
+            break
         elif logger is not None:
             l2_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
                                 - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
 
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-        break
 
+    print('Mean MSE for {} predicted timesteps: {}'.format(-FLAGS.forecast + FLAGS.num_fixed_timesteps, sum(mse) / len(mse)))
     [model.train() for model in models]
 
 def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, mask, logdir, rank_idx, replay_buffer=None):
@@ -632,11 +660,11 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # edges = edges.to(dev)
 
             if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
-
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
             else: feat_enc = feat
-            feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=True, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
+            feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:],
+                                              augment=False, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
             # [:, :, FLAGS.num_fixed_timesteps+torch.randint(5, (1,)):]
             rand_idx = torch.randint(len(models), (1,))
             latent = models[rand_idx].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
@@ -651,22 +679,22 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             # Note: only forecast
             if FLAGS.pred_only:
                 assert FLAGS.forecast > -1
-                feat = feat[: ,:, -FLAGS.forecast:]
+                feat = feat[: ,:, -FLAGS.forecast:]#[: ,:, -FLAGS.forecast:]
                 nonan_mask = feat == feat
 
 
             # Add noise to original features
-            feat_copy = feat.clone()
-            max_loc = feat[..., :2].abs().max()
-            if vel_exists:
-                max_vel = feat[..., 2:].abs().max()
-            else: max_vel = 0
-
-            feat_noise = torch.randn_like(feat).detach()
-            feat_noise.normal_()
-            feat_noise[..., :2] *= max_loc
-            feat_noise[..., 2:] *= max_vel
-            feat = feat_copy + 0.002 * feat_noise
+            # feat_copy = feat.clone()
+            # max_loc = feat[..., :2].abs().max()
+            # if vel_exists:
+            #     max_vel = feat[..., 2:].abs().max()
+            # else: max_vel = 0
+            #
+            # feat_noise = torch.randn_like(feat).detach()
+            # feat_noise.normal_()
+            # feat_noise[..., :2] *= max_loc
+            # feat_noise[..., 2:] *= max_vel
+            # feat = feat_copy + 0.002 * feat_noise
 
             latent_norm = latent.norm()
 
@@ -699,14 +727,16 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             ## MSE Loss
                 ## Note: Backprop through all sampling
-            # feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
-            #                       - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
-            feat_loss = torch.pow(feat_neg[nonan_mask]
-                                  - feat[nonan_mask], 2).mean()
+            feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:, ][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
+                                  - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
+            vel_loss = torch.pow((feat_neg[:, :,  :-1][nonan_mask[:, :,  :-1]] - feat_neg[:, :,  1:][nonan_mask[:, :,  1:]])
+                                  - (feat[:, :,  :-1][nonan_mask[:, :,  :-1]] - feat[:, :,  1:][nonan_mask[:, :,  1:]]), 2).mean()
+            # feat_loss = torch.pow(feat_neg[nonan_mask]
+            #                       - feat[nonan_mask], 2).mean()
 
 
             # pow_energy_rec = torch.pow(energy_neg, 2).mean()
-            loss = loss + feat_loss #+ feat_loss_l1
+            loss = loss + feat_loss + vel_loss #+ feat_loss_l1
 
             ### TEST FEATURE ###
             if FLAGS.cd_and_ae: # and it > 30000:
@@ -965,20 +995,19 @@ def main_single(rank, FLAGS):
 
 
         # FLAGS.model_name = FLAGS_OLD.model_name
-        FLAGS.no_mask = FLAGS_OLD.no_mask
-        FLAGS.masking_type = FLAGS_OLD.masking_type
-        FLAGS.additional_model = FLAGS_OLD.additional_model
-        FLAGS.new_dataset = FLAGS_OLD.new_dataset
-        FLAGS.compute_energy = FLAGS_OLD.compute_energy
-        FLAGS.pred_only = FLAGS_OLD.pred_only
-        # FLAGS.latent_ln = FLAGS_OLD.latent_ln
-        FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
+        # FLAGS.no_mask = FLAGS_OLD.no_mask
+        # FLAGS.masking_type = FLAGS_OLD.masking_type
+        # FLAGS.additional_model = FLAGS_OLD.additional_model
+        # FLAGS.new_dataset = FLAGS_OLD.new_dataset
+        # FLAGS.compute_energy = FLAGS_OLD.compute_energy
+        # FLAGS.pred_only = FLAGS_OLD.pred_only
+        # # FLAGS.latent_ln = FLAGS_OLD.latent_ln
+        # FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
 
         FLAGS.train = FLAGS_OLD.train
 
         # FLAGS.autoencode = FLAGS_OLD.autoencode
         # FLAGS.entropy_nn = FLAGS_OLD.entropy_nn
-        FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
         FLAGS.num_fixed_timesteps = FLAGS_OLD.num_fixed_timesteps
         # TODO: Check what attributes we are missing
 

@@ -189,7 +189,46 @@ def forward_pass_models(models, feat_in, latent, FLAGS, rel_rec=None, rel_send=N
             else: energy = models[ii + 2*iii].forward(feat_in, curr_latent, rel_rec, rel_send) + energy
     if FLAGS.additional_model:
         energy = models[-1].forward(feat_in) + energy
+    energy = new_constraint('repel_origin', feat_in, energy)
     return energy
+
+def new_constraint(type, feat_neg, energy):
+    energy_add = 0
+    if type == 'repel_origin':
+        loc_x = feat_neg[..., :1]
+        loc_y = feat_neg[..., 1:2]
+        vel = feat_neg[..., 2:]
+        vel_x = feat_neg[..., 2:3]
+        vel_y = feat_neg[..., 3:4]
+
+        loc_mod = (loc_x**2 + loc_y**2)**(0.5)
+        vel_mod = (vel_x**2 + vel_y**2)**(0.5)
+        acc_mod = ((vel_x[..., 1:, :] - vel_x[..., :-1, :])**2 +
+                   (vel_y[..., 1:, :] - vel_y[..., :-1, :])**2)**(0.5)
+
+        # # Example 1 [-2e-2, 2e-2, 4e-2] # plotwithvel
+        # energy_add = - vel_mod
+        # energy_add = 4e-2 * energy_add.mean(3).mean(2)
+
+        # # Example 2, attraction with the raw angle.
+        ref_point = (0.7, -0.4) #(loc_x[:, :1], loc_y[:, :1])
+        vector_to_ref = torch.cat([loc_x-ref_point[0], loc_y-ref_point[1]], dim= -1)
+        inner_product = (vector_to_ref*vel).sum(dim=-1)
+        a_norm = vector_to_ref.pow(2).sum(dim=-1).pow(0.5)
+        b_norm = vel.pow(2).sum(dim=-1).pow(0.5)
+        cos = inner_product / (2 * a_norm * b_norm)
+        angle = torch.acos(cos)
+        angle = torch.minimum(angle, 2*torch.pi - angle)
+        energy_add = -0.4e-3 * angle.mean(2)
+
+        ## TESTS without much success
+        # squared_angle = torch.minimum(angle, 2*torch.pi - angle)**2
+        # energy_add = -1e-4 * squared_angle.mean(2)
+        # angle = torch.minimum(angle, 2*torch.pi - angle)
+        # energy_add = -0.5e-2 * angle.mean(2)
+    energy = energy + energy_add
+    return energy
+
 
 def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_steps, sample=False, create_graph=True, idx=None, training_step=0, fixed_mask=None, rel_rec=None, rel_send=None):
     feat_negs_samples = []
@@ -278,8 +317,10 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         dev = torch.device("cpu")
 
     replay_buffer = None
-    single_pass = input('Single pass? (y: Yes): ')
-    save = input('Save? (y: Yes, n: No): ')
+    # single_pass = input('Single pass? (y: Yes): ')
+    # save = input('Save? (y: Yes, n: No): ')
+    save = 'y'
+    single_pass = 'y'
     print('Begin test:')
     [model.eval() for model in models]
     energies = []
@@ -296,8 +337,8 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         feat_copy = feat.clone()
         [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
-        b_idx = 1
-        b_idx_ref = 3
+        b_idx = 10
+        b_idx_ref = 0
 
         rw_pair = None
         affected_nodes = None
@@ -321,14 +362,14 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         ### Mask definition
         mask = torch.ones(FLAGS.components).to(dev)
         if rw_pair is not None:
-            mask[rw_pair] = 0
+            mask[rw_pair] = 2
         # mask = mask * 0
         # mask[rw_pair] = 1
 
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
+        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # We max min normalize the batch
         latent = models[0].module.embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
@@ -351,38 +392,71 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             latent[:, rw_pair] = latent[b_idx_ref:b_idx_ref+1, rw_pair]
         # latent[:] = latent[b_idx_ref:b_idx_ref+1]
         #
-        factors = [[1, 1]]
-        # factors = [[1,1], [0.5, 1], [1, 0.5], [0.5, 0.5], [0, 1], [1, 0]]
+        factors = [np.ones(latent.shape[-2])]
+        reduce = 0.2
+        augment = 1.7
+        # factors = [[1,1,1], [reduce, 1, 1], [1, reduce, 1], [1, 1, reduce],
+        #            [1, reduce, reduce], [reduce, 1, reduce], [reduce, reduce, 1]]
+
+        # factor_id = 1
+        # factors = [[0,1,1], [1,1,1], [1,1,1]]
+        # factors[1][factor_id] = reduce
+        # factors[2][factor_id] = augment
+
+        factors = [[1, 1], [1,0], [0,1]]
+        factors = [[1,1,1,1]]
+        gradplots = []
         ori_latent = latent
+        feat_ori = feat
+        # feat_negs_ori = feat_negs
         lims = None
         for factor_id, factor in enumerate(factors):
             # if len(factor) == 2:
-            latent = torch.cat([ori_latent[..., :1, :] * factor[0],
-                                ori_latent[..., 1:, :] * factor[1]], dim=-2)
+            latent = torch.cat([ori_latent[..., i:i+1, :] * factor[i]
+                                for i in range(ori_latent.shape[-2])], dim=-2)
             # elif len(factor) ==  1: latent = ori_latent[..., :1, :] * factor[0]
             # else: raise NotImplementedError
 
             latent = (latent, mask)
 
             if FLAGS.pred_only:
-                feat = feat[: ,:, -FLAGS.forecast:]
-                nonan_mask = feat == feat
+                feat_ori = feat_ori[: ,:, -FLAGS.forecast:]
+                nonan_mask = feat_ori == feat_ori
 
-            feat_neg = torch.rand_like(feat) * 2 - 1
+            feat_neg = torch.rand_like(feat_ori) * 2 - 1
 
 
-            feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
+            feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat_ori, FLAGS.num_steps_test, FLAGS.sample,
                                                                                    create_graph=False, fixed_mask=fixed_mask, rel_rec=rel_rec, rel_send=rel_send) # TODO: why create_graph
 
             energy = energy_neg
-
             if FLAGS.compute_energy:
-                with torch.no_grad():
-                    energy = forward_pass_models(models, feat, latent, FLAGS, rel_rec=rel_rec, rel_send=rel_send)
+                # with torch.no_grad():
+                feat_ori.requires_grad_()
+                energy = forward_pass_models(models, feat_ori, latent, FLAGS, rel_rec=rel_rec, rel_send=rel_send)
 
                 energies.append(energy)
                 if len(edges.shape) == 4:
                     edge_list.append(edges[:,-1,:,0])
+
+                if FLAGS.dataset == 'nba':
+                    player_id = 2
+                    feat_grad, = torch.autograd.grad([energy.sum()], [feat_ori], create_graph=False)
+                    plt, fig = get_trajectory_figure(feat_ori, lims=lims, b_idx=b_idx,
+                                          plot_type =FLAGS.plot_attr,
+                                          highlight_nodes = affected_nodes, grads = feat_grad, grad_id=player_id,
+                                          args=FLAGS
+                                          )
+                    gradplots.append((feat_grad[b_idx:b_idx+1], feat_ori[b_idx:b_idx+1], latent[0], player_id, b_idx, factor))
+                    plt.show()
+                    # logger.add_figure('gradients', get_trajectory_figure(feat_ori, lims=lims, b_idx=b_idx,
+                    #                                                      plot_type =FLAGS.plot_attr,
+                    #                                                      highlight_nodes = affected_nodes, grads = feat_grad,
+                    #                                                      args=FLAGS
+                    #                                                      )[1], 0)
+                    print('Gradients plotted.')
+                    if factor_id < len(factors) - 1:
+                        continue
 
             if save == 'y': #save:
                 # print('Latents: \n{}'.format(latent[0][b_idx].data.cpu().numpy()))
@@ -390,6 +464,37 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 # Path(savedir).mkdir(parents=True, exist_ok=True)
                 # savename = "s%08d"% (step)
                 # visualize_trajectories(feat, feat_neg, edges, savedir = os.path.join(savedir,savename))
+                if FLAGS.dataset == 'nba' and FLAGS.compute_energy:
+                    savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/gradient_plots/')
+                    inp = input('Next: n; or Save gradient plots with name: ')
+                    if inp is not 'n':
+                        for gp_id, gradplot in enumerate(gradplots):
+                            # (feat_grad[b_idx:b_idx+1], feat_ori[b_idx:b_idx+1], latent, player_id, b_idx, factor)
+                            savedir_i = savedir + inp + '_gradient_plot_PId{}_GradID{}_'.format(gradplot[3], gp_id)
+                            np.save(savedir_i + 'player_id.npy', gradplot[3])
+                            np.save(savedir_i + 'grads.npy', gradplot[0].detach().cpu().numpy())
+                            np.save(savedir_i + 'feats.npy', gradplot[1].detach().cpu().numpy())
+                            np.save(savedir_i + 'latent.npy',  gradplot[2].detach().cpu().numpy())
+                            print('Gradplot {} saved in dir {}'.format(gp_id, savedir_i))
+                        exit()
+
+                if FLAGS.dataset == 'nba':
+                    n_timesteps = 30
+                    n_removed_timesteps = 1
+                    feat = feat[:, :, n_removed_timesteps:n_timesteps]
+                    feat_negs = [feat_neg_i[:, :, n_removed_timesteps:n_timesteps] for feat_neg_i in feat_negs]
+
+                    player_id = -1
+                    # feat = feat_ori[:, 1:]
+                    # feat_negs = [feat_neg[:, 1:] for feat_neg in feat_negs]
+                    feat_negs[-1][:, :1] = feat[:, :1]
+                    if player_id != -1:
+                        feat_negs[-1][:, :player_id] = feat[:, :player_id]
+                        if player_id < feat.shape[1] -1:
+                            feat_negs[-1][:, player_id+1:] = feat[:, player_id+1:]
+                        affected_nodes = np.zeros(feat.shape[1])
+                        affected_nodes[player_id] = 1
+
                 if FLAGS.compute_energy:
                     for i in range(edge_list[0].shape[0]):
                         if (1-edge_list[-1][i:i+1]).sum() == 2:
@@ -404,12 +509,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                     savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/outlier_detection/')
                     feat = feat_copy
 
-
+                # print(feat_negs[-1].shape, feat.shape)
                 limpos = limneg = 1
                 if torch.logical_not(nonan_mask).sum() > 0 and lims is None:
                     lims = [-limneg, limpos]
-                elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
-                                           feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
+                # elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
+                #                            feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
                 for i_plt in range(len(feat_negs)):
                     logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + i_plt + 100*factor_id)
                 # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
@@ -417,7 +522,16 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                 logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
                 logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
                 print('Plotted.')
-
+                if FLAGS.dataset == 'nba':
+                    savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/new_constrain/')
+                    inp = input('Next: n; or Save newconstrain plot with name: ')
+                    if inp is not 'n':
+                        # (feat_grad[b_idx:b_idx+1], feat_ori[b_idx:b_idx+1], latent, player_id, b_idx, factor)
+                        savedir_i = savedir + inp + '_new_constrain_'
+                        np.save(savedir_i + 'feats.npy', feat.detach().cpu().numpy())
+                        np.save(savedir_i + 'feat_negs.npy', torch.stack(feat_negs).detach().cpu().numpy())
+                        np.save(savedir_i + 'feat_neg_last.npy',  feat_negs[-1].detach().cpu().numpy())
+                        print('results saved')
                 if FLAGS.compute_energy:
                     inp = input('Next: n; or Save with name: ')
                     if inp is not 'n':
@@ -428,6 +542,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                         np.save(savedir + 'gt_traj_pred.npy', feat[b_idx:b_idx+1].detach().cpu().numpy())
                         print('All saved in dir {}'.format(savedir))
                         exit()
+                else: exit()
         if single_pass == 'y':
             break
             # elif logger is not None:
@@ -459,6 +574,7 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
     else:
         dev = torch.device("cpu")
 
+    mse = []
     [model.eval() for model in models]
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
         bs = feat.shape[0]
@@ -493,7 +609,7 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
         if FLAGS.forecast is not -1:
             feat_enc = feat[:, :, :-FLAGS.forecast]
         else: feat_enc = feat
-        feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=False, normalize=FLAGS.normalize_data_latent)
+        feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent)
         # [:, :, FLAGS.num_fixed_timesteps:]
         latent = models[0].module.embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
@@ -511,6 +627,13 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
 
         feat_neg, feat_negs, energy_neg, feat_grad = gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, FLAGS.num_steps_test, FLAGS.sample,
                                                                                 create_graph=False, rel_rec=rel_rec, rel_send=rel_send) # TODO: why create_graph
+
+        notpred = 19
+        if notpred != 0:
+            mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred],
+                                  feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred]))
+        else:             mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
+                                                feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]))
 
         if save:
             limpos = limneg = 1
@@ -533,7 +656,8 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
 
             logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
         break
-
+    print('Shape: ', feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:].shape)
+    print('Mean MSE for {} predicted timesteps: {}'.format(-FLAGS.forecast + FLAGS.num_fixed_timesteps, sum(mse) / len(mse)))
     [model.train() for model in models]
 
 def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, mask, logdir, rank_idx, replay_buffer=None):
@@ -555,18 +679,17 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
             bs = feat.shape[0]
             loss = 0.0
-            feat = feat[..., :2].to(dev)
+            feat = feat.to(dev)
             rel_rec, rel_send = rel_rec[:1].to(dev), rel_send[:1].to(dev)
             nonan_mask = feat == feat
             feat[torch.logical_not(nonan_mask)] = 10
             # edges = edges.to(dev)
-
             if it == FLAGS.resume_iter: [save_rel_matrices(model, rel_rec.to(dev), rel_send.to(dev)) for model in models]
 
             if FLAGS.forecast is not -1:
                 feat_enc = feat[:, :, :-FLAGS.forecast]
             else: feat_enc = feat
-            feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=True, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
+            feat_enc = normalize_trajectories(feat_enc, augment=False, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
             # [:, :, FLAGS.num_fixed_timesteps+torch.randint(5, (1,)):]
             rand_idx = torch.randint(len(models), (1,))
             latent = models[rand_idx].module.embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
@@ -586,17 +709,17 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
 
             # Add noise to original features
-            feat_copy = feat.clone()
-            max_loc = feat[..., :2].abs().max()
-            if vel_exists:
-                max_vel = feat[..., 2:].abs().max()
-            else: max_vel = 0
-
-            feat_noise = torch.randn_like(feat).detach()
-            feat_noise.normal_()
-            feat_noise[..., :2] *= max_loc
-            feat_noise[..., 2:] *= max_vel
-            feat = feat_copy + 0.002 * feat_noise
+            # feat_copy = feat.clone()
+            # max_loc = feat[..., :2].abs().max()
+            # if vel_exists:
+            #     max_vel = feat[..., 2:].abs().max()
+            # else: max_vel = 0
+            #
+            # feat_noise = torch.randn_like(feat).detach()
+            # feat_noise.normal_()
+            # feat_noise[..., :2] *= max_loc
+            # feat_noise[..., 2:] *= max_vel
+            # feat = feat_copy + 0.002 * feat_noise
 
             latent_norm = latent.norm()
 
@@ -630,18 +753,21 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             ## MSE Loss
                 ## Note: Backprop through all sampling
             # TODO: for nba maybe we don't need to supervize the ball
-            # feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
-            #                       - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
-            if FLAGS.dataset != 'nba':
-                feat_loss = torch.pow(feat_neg[nonan_mask]
-                                      - feat[nonan_mask], 2).mean()
-            else:
-                feat_loss = torch.pow(feat_neg[:, 1:][nonan_mask[:, 1:]]
-                                      - feat[:, 1:][nonan_mask[:, 1:]], 2).mean()
+            feat_loss = torch.pow(feat_neg[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]]
+                                  - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
+            # if FLAGS.dataset != 'nba':
+            # print(nonan_mask.sum(), feat_neg.shape, feat_neg.max())
+            # feat_loss = torch.pow(feat_neg[nonan_mask]
+            #                           - feat[nonan_mask], 2).mean()
+            vel_loss = torch.pow((feat_neg[:, :,  :-1][nonan_mask[:, :,  :-1]] - feat_neg[:, :,  1:][nonan_mask[:, :,  1:]])
+                                 - (feat[:, :,  :-1][nonan_mask[:, :,  :-1]] - feat[:, :,  1:][nonan_mask[:, :,  1:]]), 2).mean()
+            # else:
+            #     feat_loss = torch.pow(feat_neg[:, 1:][nonan_mask[:, 1:]]
+            #                           - feat[:, 1:][nonan_mask[:, 1:]], 2).mean()
 
 
             # pow_energy_rec = torch.pow(energy_neg, 2).mean()
-            loss = loss + feat_loss #+ feat_loss_l1
+            loss = loss + feat_loss + vel_loss #+ feat_loss_l1
 
             ### TEST FEATURE ###
             if FLAGS.cd_and_ae: # and it > 30000:
@@ -666,7 +792,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 energy_neg = forward_pass_models(models, feat_neg.detach(), latent, FLAGS, rel_rec=rel_rec, rel_send=rel_send)
                 ml_loss = energy_pos.mean() - energy_neg.mean()
                 pow_energy_rec = (torch.pow(energy_pos, 2).mean() + torch.pow(energy_neg, 2).mean())
-                loss = loss + 1e-4 * (ml_loss + pow_energy_rec)
+                loss = loss + 1e-4 * (ml_loss + pow_energy_rec) #
 
             else: loss = loss #+ pow_energy_rec
 
@@ -830,6 +956,7 @@ def main_single(rank, FLAGS):
     # p = random.randint(0, 9)
     if world_size > 1:
         group = dist.init_process_group(backend='nccl', init_method='tcp://localhost:'+str(FLAGS.port), world_size=world_size, rank=rank_idx, group_name="default")
+
     torch.cuda.set_device(rank)
     device = torch.device('cuda')
 
@@ -904,12 +1031,12 @@ def main_single(rank, FLAGS):
 
 
         # FLAGS.model_name = FLAGS_OLD.model_name
-        FLAGS.no_mask = FLAGS_OLD.no_mask
-        FLAGS.masking_type = FLAGS_OLD.masking_type
-        FLAGS.additional_model = FLAGS_OLD.additional_model
-        FLAGS.new_dataset = FLAGS_OLD.new_dataset
-        FLAGS.compute_energy = FLAGS_OLD.compute_energy
-        FLAGS.pred_only = FLAGS_OLD.pred_only
+        # FLAGS.no_mask = FLAGS_OLD.no_mask
+        # FLAGS.masking_type = FLAGS_OLD.masking_type
+        # FLAGS.additional_model = FLAGS_OLD.additional_model
+        # FLAGS.new_dataset = FLAGS_OLD.new_dataset
+        # FLAGS.compute_energy = FLAGS_OLD.compute_energy
+        # FLAGS.pred_only = FLAGS_OLD.pred_only
         # FLAGS.latent_ln = FLAGS_OLD.latent_ln
         FLAGS.cd_and_ae = FLAGS_OLD.cd_and_ae
 
@@ -969,7 +1096,8 @@ def main():
 
     FLAGS = parser.parse_args()
     if FLAGS.no_mask: FLAGS.masking_type = 'ones'
-
+    if FLAGS.test_manipulate: os.environ["CUDA_VISIBLE_DEVICES"]="{}".format(FLAGS.gpu_rank)
+    os.environ["CUDA_VISIBLE_DEVICES"]="{}".format(FLAGS.gpu_rank)
     FLAGS.components = FLAGS.n_objects ** 2 - FLAGS.n_objects
     # FLAGS.tie_weight = True
     FLAGS.sample = True
