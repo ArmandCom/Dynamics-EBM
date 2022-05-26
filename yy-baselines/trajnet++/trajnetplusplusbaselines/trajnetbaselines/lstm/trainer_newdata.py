@@ -1,4 +1,4 @@
-"""Command line tool to train an SGAN model."""
+"""Command line tool to train an LSTM model."""
 
 import argparse
 import logging
@@ -8,42 +8,35 @@ import time
 import random
 import os
 import pickle
-import copy
-
-import numpy as np
-
 import torch
+import numpy as np
 import trajnetplusplustools
-
 from .. import augmentation
-from ..lstm.loss import PredictionLoss, L2Loss
-from ..lstm.loss import gan_d_loss, gan_g_loss # variety_loss
-from ..lstm.gridbased_pooling import GridBasedPooling
-from ..lstm.non_gridbased_pooling import NearestNeighborMLP, HiddenStateMLPPooling, AttentionMLPPooling
-from ..lstm.non_gridbased_pooling import NearestNeighborLSTM, TrajectronPooling
-from .sgan import SGAN, drop_distant, SGANPredictor
-from .sgan import LSTMGenerator, LSTMDiscriminator
+from .loss import PredictionLoss, L2Loss
+from .lstm import LSTM, LSTMPredictor, drop_distant
+from .gridbased_pooling import GridBasedPooling
+from .non_gridbased_pooling import NearestNeighborMLP, HiddenStateMLPPooling, AttentionMLPPooling
+from .non_gridbased_pooling import NearestNeighborLSTM, TrajectronPooling
 from .. import __version__ as VERSION
 
-from ..lstm.utils import center_scene, random_rotation
-from ..lstm.data_load_utils import prepare_data
+from .utils import center_scene, random_rotation
+from .data_load_utils import prepare_new_data
 
+save_data = False
+split = 'train'
 
 class Trainer(object):
-    def __init__(self, model=None, g_optimizer=None, g_lr_scheduler=None, d_optimizer=None, d_lr_scheduler=None,
-                 criterion=None, device=None, batch_size=8, obs_length=9, pred_length=12, augment=True,
-                 normalize_scene=False, save_every=1, start_length=0, val_flag=True):
-        self.model = model if model is not None else SGAN()
-        self.g_optimizer = g_optimizer if g_optimizer is not None else torch.optim.Adam(
-                           model.generator.parameters(), lr=1e-3, weight_decay=1e-4)
-        self.d_optimizer = d_optimizer if d_optimizer is not None else torch.optim.Adam(
-                           model.discriminator.parameters(), lr=1e-3, weight_decay=1e-4)
-        self.g_lr_scheduler = g_lr_scheduler if g_lr_scheduler is not None else \
-                              torch.optim.lr_scheduler.StepLR(g_optimizer, 10)
-        self.d_lr_scheduler = d_lr_scheduler if d_lr_scheduler is not None else \
-                              torch.optim.lr_scheduler.StepLR(d_optimizer, 10)
+    def __init__(self, model=None, criterion=None, optimizer=None, lr_scheduler=None,
+                 device=None, batch_size=8, obs_length=9, pred_length=12, augment=True,
+                 normalize_scene=False, save_every=1, start_length=0, obs_dropout=False,
+                 augment_noise=False, val_flag=True):
+        self.model = model if model is not None else LSTM()
+        self.criterion = criterion if criterion is not None else PredictionLoss()
+        self.optimizer = optimizer if optimizer is not None else \
+                         torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        self.lr_scheduler = lr_scheduler if lr_scheduler is not None else \
+                            torch.optim.lr_scheduler.StepLR(self.optimizer, 15)
 
-        self.criterion = criterion if criterion is not None else PredictionLoss(keep_batch_dim=True)
         self.device = device if device is not None else torch.device('cpu')
         self.model = self.model.to(self.device)
         self.criterion = self.criterion.to(self.device)
@@ -54,10 +47,13 @@ class Trainer(object):
         self.obs_length = obs_length
         self.pred_length = pred_length
         self.seq_length = self.obs_length+self.pred_length
-        self.start_length = start_length
 
         self.augment = augment
+        self.augment_noise = augment_noise
         self.normalize_scene = normalize_scene
+
+        self.start_length = start_length
+        self.obs_dropout = obs_dropout
 
         self.val_flag = val_flag
 
@@ -65,57 +61,51 @@ class Trainer(object):
         for epoch in range(start_epoch, epochs):
             if epoch % self.save_every == 0:
                 state = {'epoch': epoch, 'state_dict': self.model.state_dict(),
-                         'g_optimizer': self.g_optimizer.state_dict(), 'd_optimizer': self.d_optimizer.state_dict(),
-                         'g_lr_scheduler': self.g_lr_scheduler.state_dict(),
-                         'd_lr_scheduler': self.d_lr_scheduler.state_dict()}
-                SGANPredictor(self.model).save(state, out + '.epoch{}'.format(epoch))
+                         'optimizer': self.optimizer.state_dict(),
+                         'scheduler': self.lr_scheduler.state_dict()}
+                LSTMPredictor(self.model).save(state, out + '.epoch{}'.format(epoch))
             self.train(train_scenes, train_goals, epoch)
             if self.val_flag:
                 self.val(val_scenes, val_goals, epoch)
 
+
         state = {'epoch': epoch + 1, 'state_dict': self.model.state_dict(),
-                 'g_optimizer': self.g_optimizer.state_dict(), 'd_optimizer': self.d_optimizer.state_dict(),
-                 'g_lr_scheduler': self.g_lr_scheduler.state_dict(),
-                 'd_lr_scheduler': self.d_lr_scheduler.state_dict()}
-        SGANPredictor(self.model).save(state, out + '.epoch{}'.format(epoch + 1))
-        SGANPredictor(self.model).save(state, out)
+                 'optimizer': self.optimizer.state_dict(),
+                 'scheduler': self.lr_scheduler.state_dict()}
+        LSTMPredictor(self.model).save(state, out + '.epoch{}'.format(epoch + 1))
+        LSTMPredictor(self.model).save(state, out)
 
     def get_lr(self):
-        for param_group in self.g_optimizer.param_groups:
+        for param_group in self.optimizer.param_groups:
             return param_group['lr']
 
     def train(self, scenes, goals, epoch):
         start_time = time.time()
 
         print('epoch', epoch)
-
+        scenes = list(scenes)
         random.shuffle(scenes)
         epoch_loss = 0.0
         self.model.train()
-        self.g_optimizer.zero_grad()
-        self.d_optimizer.zero_grad()
+        self.optimizer.zero_grad()
 
         ## Initialize batch of scenes
         batch_scene = []
         batch_scene_goal = []
         batch_split = [0]
 
-        d_steps_left = self.model.d_steps
-        g_steps_left = self.model.g_steps
-        for scene_i, (filename, scene_id, paths) in enumerate(scenes):
+
+        for scene_i, scene in enumerate(scenes):
             scene_start = time.time()
+            n_objects = scene.shape[1]
+            # make new scene
+            # scene = trajnetplusplustools.Reader.paths_to_xy(paths)
 
-            ## make new scene
-            scene = trajnetplusplustools.Reader.paths_to_xy(paths)
-
-            ## get goals
-            if goals is not None:
-                scene_goal = np.array(goals[filename][scene_id])
-            else:
-                scene_goal = np.array([[0, 0] for path in paths])
+            scene_goal = np.array([[0, 0] for i in range(n_objects)])
 
             ## Drop Distant
-            scene, mask = drop_distant(scene) # mask: Bool[NO]
+            # sel_scene, mask = drop_distant(sel_scene)
+            mask = [True]*n_objects
             scene_goal = scene_goal[mask]
 
             ##process scene
@@ -123,11 +113,16 @@ class Trainer(object):
                 scene, _, _, scene_goal = center_scene(scene, self.obs_length, goals=scene_goal)
             if self.augment:
                 scene, scene_goal = random_rotation(scene, goals=scene_goal)
-            
+            if self.augment_noise:
+                scene = augmentation.add_noise(scene, thresh=0.02, ped='neigh')
+
             ## Augment scene to batch of scenes
             batch_scene.append(scene)
-            batch_split.append(int(scene.shape[1]))
+            batch_split.append(int(n_objects))
             batch_scene_goal.append(scene_goal)
+
+            if save_data:
+                continue
 
             if ((scene_i + 1) % self.batch_size == 0) or ((scene_i + 1) == len(scenes)):
                 ## Construct Batch
@@ -141,21 +136,8 @@ class Trainer(object):
 
                 preprocess_time = time.time() - scene_start
 
-                # Decide whether to use the batch for stepping on discriminator or
-                # generator; an iteration consists of args.g_steps steps on the
-                # generator followed by args.d_steps steps on the discriminator.
-                if g_steps_left > 0:
-                    step_type = 'g'
-                    g_steps_left -= 1
-                    ## Train Batch
-                    loss = self.train_batch(batch_scene, batch_scene_goal, batch_split, step_type='g')
-
-                elif d_steps_left > 0:
-                    step_type = 'd'
-                    d_steps_left -= 1
-                    ## Train Batch
-                    loss = self.train_batch(batch_scene, batch_scene_goal, batch_split, step_type='d')
-
+                ## Train Batch
+                loss = self.train_batch(batch_scene, batch_scene_goal, batch_split)
                 epoch_loss += loss
                 total_time = time.time() - scene_start
 
@@ -163,11 +145,6 @@ class Trainer(object):
                 batch_scene = []
                 batch_scene_goal = []
                 batch_split = [0]
-
-                ## Update d_steps, g_steps once they end
-                if d_steps_left == 0 and g_steps_left == 0:
-                    d_steps_left = self.model.d_steps
-                    g_steps_left = self.model.g_steps
 
             if (scene_i + 1) % (10*self.batch_size) == 0:
                 self.log.info({
@@ -179,9 +156,21 @@ class Trainer(object):
                     'loss': round(loss, 3),
                 })
 
-        self.g_lr_scheduler.step()
-        self.d_lr_scheduler.step()
+        ### Note: Save data for other models.
+        if save_data and split == 'train':
+            datadir = '/data/Armand/TrajNet/'
+            batch_scene = np.stack(batch_scene, axis=0)
+            batch_scene_goal = np.stack(batch_scene_goal, axis=0)
+            batch_split = np.cumsum(batch_split)
+            bs, T, no, _ = batch_scene.shape
+            suffix = split + '_' + scenes[0][0] + '_T' + str(T) + '_Nobj' + str(no)
+            np.save(datadir + 'scene_' + suffix + '.npy', batch_scene)
+            np.save(datadir + 'scene_goal_' + suffix + '.npy', batch_scene_goal)
+            np.save(datadir + 'split_' + suffix + '.npy', batch_split)
+            print('Train Saved.')
+            exit()
 
+        self.lr_scheduler.step()
         self.log.info({
             'type': 'train-epoch',
             'epoch': epoch + 1,
@@ -194,26 +183,25 @@ class Trainer(object):
 
         val_loss = 0.0
         test_loss = 0.0
-        self.model.train()  # so that it does not return positions but still normals
+        scenes = list(scenes)
+        self.model.train()
 
         ## Initialize batch of scenes
         batch_scene = []
         batch_scene_goal = []
         batch_split = [0]
 
-        for scene_i, (filename, scene_id, paths) in enumerate(scenes):
+        for scene_i, scene in enumerate(scenes):
+            scene_start = time.time()
+            n_objects = scene.shape[1]
             # make new scene
-            scene = trajnetplusplustools.Reader.paths_to_xy(paths)
+            # scene = trajnetplusplustools.Reader.paths_to_xy(paths)
 
-            ## get goals
-            if goals is not None:
-                # scene_goal = np.array([goals[path[0].pedestrian] for path in paths])
-                scene_goal = np.array(goals[filename][scene_id])
-            else:
-                scene_goal = np.array([[0, 0] for path in paths])
+            scene_goal = np.array([[0, 0] for i in range(n_objects)])
 
             ## Drop Distant
-            scene, mask = drop_distant(scene)
+            # sel_scene, mask = drop_distant(sel_scene)
+            mask = [True]*n_objects
             scene_goal = scene_goal[mask]
 
             ##process scene
@@ -224,6 +212,9 @@ class Trainer(object):
             batch_scene.append(scene)
             batch_split.append(int(scene.shape[1]))
             batch_scene_goal.append(scene_goal)
+
+            if save_data:
+                continue
 
             if ((scene_i + 1) % self.batch_size == 0) or ((scene_i + 1) == len(scenes)):
                 ## Construct Batch
@@ -244,6 +235,19 @@ class Trainer(object):
                 batch_scene_goal = []
                 batch_split = [0]
 
+        ### Note: Save data for other models.
+        if save_data and split == 'val':
+            datadir = '/data/Armand/TrajNet/'
+            batch_scene = np.stack(batch_scene, axis=0)
+            batch_scene_goal = np.stack(batch_scene_goal, axis=0)
+            batch_split = np.cumsum(batch_split)
+            bs, T, no, _ = batch_scene.shape
+            suffix = split + '_' + scenes[0][0] + '_T' + str(T) + '_Nobj' + str(no)
+            np.save(datadir + 'scene_' + suffix + '.npy', batch_scene)
+            np.save(datadir + 'scene_goal_' + suffix + '.npy', batch_scene_goal)
+            np.save(datadir + 'split_' + suffix + '.npy', batch_split)
+            print('Val Saved.')
+            exit()
         eval_time = time.time() - eval_start
 
         self.log.info({
@@ -254,7 +258,7 @@ class Trainer(object):
             'time': round(eval_time, 1),
         })
 
-    def train_batch(self, batch_scene, batch_scene_goal, batch_split, step_type):
+    def train_batch(self, batch_scene, batch_scene_goal, batch_split):
         """Training of B batches in parallel, B : batch_size
 
         Parameters
@@ -266,8 +270,6 @@ class Trainer(object):
         batch_split : Tensor [batch_size + 1]
             Tensor defining the split of the batch.
             Required to identify the tracks of to the same scene
-        step_type : String ('g', 'd')
-            Determines whether to train generator or discriminator
 
         Returns
         -------
@@ -275,23 +277,26 @@ class Trainer(object):
             Training loss of the batch
         """
 
+        ## If observation dropout active
+        if self.obs_dropout:
+            self.start_length = random.randint(0, self.obs_length - 2)
+
         observed = batch_scene[self.start_length:self.obs_length].clone()
-        prediction_truth = batch_scene[self.obs_length:].clone()
+        prediction_truth = batch_scene[self.obs_length:self.seq_length-1].clone()
         targets = batch_scene[self.obs_length:self.seq_length] - batch_scene[self.obs_length-1:self.seq_length-1]
 
-        rel_output_list, outputs, scores_real, scores_fake = self.model(observed, batch_scene_goal, batch_split, prediction_truth,
-                                                                        step_type=step_type, pred_length=self.pred_length)
-        loss = self.loss_criterion(rel_output_list, targets, batch_split, scores_fake, scores_real, step_type)
+        rel_outputs, outputs = self.model(observed, batch_scene_goal, batch_split, prediction_truth)
 
-        if step_type == 'g':
-            self.g_optimizer.zero_grad()
-            loss.backward()
-            self.g_optimizer.step()
+        # For collision loss calculation
+        primary_prediction = batch_scene[-self.pred_length:].clone()
+        primary_prediction[:, batch_split[:-1]] = outputs[-self.pred_length:, batch_split[:-1]]
 
-        else:
-            self.d_optimizer.zero_grad()
-            loss.backward()
-            self.d_optimizer.step()
+        ## Loss wrt primary tracks of each scene only
+        loss = self.criterion(rel_outputs[-self.pred_length:], targets, batch_split, primary_prediction) * self.batch_size
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         return loss.item()
 
@@ -312,92 +317,30 @@ class Trainer(object):
         -------
         loss : scalar
             Validation loss of the batch when groundtruth of neighbours
-            is not provided
+            is provided
+        loss_test : scalar
+            Validation loss of the batch when groundtruth of neighbours
+            is not provided (evaluation scenario)
         """
+
+        if self.obs_dropout:
+            self.start_length = 0
 
         observed = batch_scene[self.start_length:self.obs_length]
-        prediction_truth = batch_scene[self.obs_length:].clone()  ## CLONE
+        prediction_truth = batch_scene[self.obs_length:self.seq_length-1].clone()  ## CLONE
         targets = batch_scene[self.obs_length:self.seq_length] - batch_scene[self.obs_length-1:self.seq_length-1]
-        
+        observed_test = observed.clone()
+
         with torch.no_grad():
-            rel_output_list, _, _, _ = self.model(observed, batch_scene_goal, batch_split,
-                                                  n_predict=self.pred_length, pred_length=self.pred_length)
+            ## groundtruth of neighbours provided (Better validation curve to monitor model)
+            rel_outputs, _ = self.model(observed, batch_scene_goal, batch_split, prediction_truth)
+            loss = self.criterion(rel_outputs[-self.pred_length:], targets, batch_split) * self.batch_size
 
-            ## top-k loss
-            loss = self.variety_loss(rel_output_list, targets, batch_split)
+            ## groundtruth of neighbours not provided
+            rel_outputs_test, _ = self.model(observed_test, batch_scene_goal, batch_split, n_predict=self.pred_length)
+            loss_test = self.criterion(rel_outputs_test[-self.pred_length:], targets, batch_split) * self.batch_size
 
-        return 0.0, loss.item()
-
-    def loss_criterion(self, rel_output_list, targets, batch_split, scores_fake, scores_real, step_type):
-        """ Loss calculation function
-
-        Parameters
-        ----------
-        rel_output_list : List of length k
-            Each element of the list is Tensor [pred_length, num_tracks, 5]
-            Predicted velocities of pedestrians as multivariate normal
-            i.e. positions relative to previous positions
-        targets : Tensor [pred_length, batch_size, 2]
-            Groundtruth sequence of primary pedestrians of each scene
-        batch_split : Tensor [batch_size + 1]
-            Tensor defining the split of the batch.
-            Required to identify the primary tracks of each scene
-        scores_real : Tensor [batch_size, ]
-            Discriminator scores of groundtruth primary tracks
-        scores_fake : Tensor [batch_size, ]
-            Discriminator scores of prediction primary tracks
-        step_type : 'g' / 'd'
-            Determines whether to train the generator / discriminator
-
-        Returns
-        -------
-        loss : Tensor [1,]
-            The corresponding generator / discriminator loss
-        """
-
-        if step_type == 'd':
-            loss = gan_d_loss(scores_real, scores_fake)
-
-        else:
-            ## top-k loss
-            loss = self.variety_loss(rel_output_list, targets, batch_split)
-
-            ## If discriminator used.
-            if self.model.d_steps:
-                loss += gan_g_loss(scores_fake)
-
-        return loss
-
-    def variety_loss(self, inputs, target, batch_split):
-        """ Variety loss calculation as proposed in SGAN
-
-        Parameters
-        ----------
-        inputs : List of length k
-            Each element of the list is Tensor [pred_length, num_tracks, 5]
-            Predicted velocities of pedestrians as multivariate normal
-            i.e. positions relative to previous positions
-        target : Tensor [pred_length, num_tracks, 2]
-            Groundtruth sequence of primary pedestrians of each scene
-        batch_split : Tensor [batch_size + 1]
-            Tensor defining the split of the batch.
-            Required to identify the primary tracks of each scene
-
-        Returns
-        -------
-        loss : Tensor [1,]
-            variety loss
-        """
-
-        iterative_loss = [] 
-        for sample in inputs:
-            sample_loss = self.criterion(sample[-self.pred_length:], target, batch_split)
-            iterative_loss.append(sample_loss)
-
-        loss = torch.stack(iterative_loss)
-        loss = torch.min(loss, dim=0)[0]
-        loss = torch.sum(loss)
-        return loss
+        return loss.item(), loss_test.item()
 
 def main(epochs=25):
     parser = argparse.ArgumentParser()
@@ -405,13 +348,17 @@ def main(epochs=25):
                         help='number of epochs')
     parser.add_argument('--save_every', default=5, type=int,
                         help='frequency of saving model (in terms of epochs)')
-    parser.add_argument('--obs_length', default=9, type=int,
+    parser.add_argument('--obs_length', default=59, type=int,
                         help='observation length')
-    parser.add_argument('--pred_length', default=12, type=int,
+    parser.add_argument('--pred_length', default=40, type=int,
                         help='prediction length')
     parser.add_argument('--start_length', default=0, type=int,
                         help='starting time step of encoding observation')
     parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--lr', default=1e-3, type=float,
+                        help='initial learning rate')
+    parser.add_argument('--step_size', default=10, type=int,
+                        help='step_size of lr scheduler')
     parser.add_argument('-o', '--output', default=None,
                         help='output file')
     parser.add_argument('--disable-cuda', action='store_true',
@@ -435,6 +382,10 @@ def main(epochs=25):
                         help='perform rotation augmentation')
     parser.add_argument('--normalize_scene', action='store_true',
                         help='rotate scene so primary pedestrian moves northwards at end of observation')
+    parser.add_argument('--augment_noise', action='store_true',
+                        help='flag to add noise to observations for robustness')
+    parser.add_argument('--obs_dropout', action='store_true',
+                        help='perform observation length dropout')
 
     ## Loading pre-trained models
     pretrain = parser.add_argument_group('pretraining')
@@ -488,40 +439,24 @@ def main(epochs=25):
     hyperparameters.add_argument('--mp_iters', default=5, type=int,
                                  help='message passing iterations in NMMP')
 
-    ## SGAN-Specific Parameters
-    hyperparameters.add_argument('--g_steps', default=1, type=int,
-                                 help='number of steps of generator training')
-    hyperparameters.add_argument('--d_steps', default=1, type=int,
-                                 help='number of steps of discriminator training')
-    hyperparameters.add_argument('--g_lr', default=1e-3, type=float,
-                                 help='initial generator learning rate')
-    hyperparameters.add_argument('--d_lr', default=1e-3, type=float,
-                                 help='initial discriminator learning rate')
-    hyperparameters.add_argument('--g_step_size', default=10, type=int,
-                                 help='step_size of generator scheduler')
-    hyperparameters.add_argument('--d_step_size', default=10, type=int,
-                                 help='step_size of discriminator scheduler')
-    hyperparameters.add_argument('--no_noise', action='store_true',
-                                 help='flag to not add noise (i.e. deterministic model)')
-    hyperparameters.add_argument('--noise_dim', type=int, default=16,
-                                 help='dimension of noise z')
-    hyperparameters.add_argument('--noise_type', default='gaussian',
-                                 choices=('gaussian', 'uniform'),
-                                 help='type of noise to be added')
-    hyperparameters.add_argument('--k', type=int, default=1,
-                                 help='number of samples for variety loss')
+    ## Collision Loss
+    hyperparameters.add_argument('--col_wt', default=0., type=float,
+                                 help='collision loss weight')
+    hyperparameters.add_argument('--col_distance', default=0.2, type=float,
+                                 help='distance threshold post which collision occurs')
     args = parser.parse_args()
 
     ## Set seed for reproducibility
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
+    ## Define location to save trained model
     if not os.path.exists('OUTPUT_BLOCK/{}'.format(args.path)):
         os.makedirs('OUTPUT_BLOCK/{}'.format(args.path))
     if args.goals:
-        args.output = 'OUTPUT_BLOCK/{}/sgan_goals_{}_{}.pkl'.format(args.path, args.type, args.output)
+        args.output = 'OUTPUT_BLOCK/{}/lstm_goals_{}_{}.pkl'.format(args.path, args.type, args.output)
     else:
-        args.output = 'OUTPUT_BLOCK/{}/sgan_{}_{}.pkl'.format(args.path, args.type, args.output)
+        args.output = 'OUTPUT_BLOCK/{}/lstm_{}_{}.pkl'.format(args.path, args.type, args.output)
 
     # configure logging
     from pythonjsonlogger import jsonlogger
@@ -541,6 +476,7 @@ def main(epochs=25):
     })
 
     # refactor args for --load-state
+    # loading a previously saved model
     args.load_state_strict = True
     if args.nonstrict_load_state:
         args.load_state = args.nonstrict_load_state
@@ -555,8 +491,8 @@ def main(epochs=25):
 
     args.path = 'DATA_BLOCK/' + args.path
     ## Prepare data
-    train_scenes, train_goals, _ = prepare_data(args.path, subset='/train/', sample=args.sample, goals=args.goals)
-    val_scenes, val_goals, val_flag = prepare_data(args.path, subset='/val/', sample=args.sample, goals=args.goals)
+    train_scenes, train_goals, _ = prepare_new_data(args.path, subset='/train/', sample=args.sample, goals=args.goals)
+    val_scenes, val_goals, val_flag = prepare_new_data(args.path, subset='/val/', sample=args.sample, goals=args.goals)
 
     ## pretrained pool model (if any)
     pretrained_pool = None
@@ -582,32 +518,23 @@ def main(epochs=25):
                                 constant=args.pool_constant, pretrained_pool_encoder=pretrained_pool,
                                 norm=args.norm, layer_dims=args.layer_dims, latent_dim=args.latent_dim)
 
-    # generator
-    lstm_generator = LSTMGenerator(embedding_dim=args.coordinate_embedding_dim, hidden_dim=args.hidden_dim,
-                                   pool=pool, goal_flag=args.goals, goal_dim=args.goal_dim, noise_dim=args.noise_dim,
-                                   no_noise=args.no_noise, noise_type=args.noise_type)
+    # create forecasting model
+    model = LSTM(pool=pool,
+                 embedding_dim=args.coordinate_embedding_dim,
+                 hidden_dim=args.hidden_dim,
+                 goal_flag=args.goals,
+                 goal_dim=args.goal_dim)
 
-    # discriminator
-    lstm_discriminator = LSTMDiscriminator(embedding_dim=args.coordinate_embedding_dim,
-                                           hidden_dim=args.hidden_dim, pool=copy.deepcopy(pool),
-                                           goal_flag=args.goals, goal_dim=args.goal_dim)
-
-    # GAN model
-    model = SGAN(generator=lstm_generator, discriminator=lstm_discriminator, g_steps=args.g_steps,
-                 d_steps=args.d_steps, k=args.k)
-
-    # Optimizer and Scheduler
-    g_optimizer = torch.optim.Adam(model.generator.parameters(), lr=args.g_lr, weight_decay=1e-4)
-    d_optimizer = torch.optim.Adam(model.discriminator.parameters(), lr=args.d_lr, weight_decay=1e-4)
-    g_lr_scheduler = torch.optim.lr_scheduler.StepLR(g_optimizer, args.g_step_size)
-    d_lr_scheduler = torch.optim.lr_scheduler.StepLR(d_optimizer, args.d_step_size)
+    # optimizer and schedular
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    lr_scheduler = None
+    if args.step_size is not None:
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.step_size)
     start_epoch = 0
 
     # Loss Criterion
-    if args.loss == 'L2':
-        criterion = L2Loss(keep_batch_dim=True)
-    else:
-        criterion = PredictionLoss(keep_batch_dim=True)
+    criterion = L2Loss(col_wt=args.col_wt, col_distance=args.col_distance) if args.loss == 'L2' \
+                    else PredictionLoss(col_wt=args.col_wt, col_distance=args.col_distance)
 
     # train
     if args.load_state:
@@ -623,19 +550,16 @@ def main(epochs=25):
         # load optimizers from last training
         # useful to continue model training
             print("Loading Optimizer Dict")
-            g_optimizer.load_state_dict(checkpoint['g_optimizer'])
-            d_optimizer.load_state_dict(checkpoint['d_optimizer'])
-            g_lr_scheduler.load_state_dict(checkpoint['g_lr_scheduler'])
-            d_lr_scheduler.load_state_dict(checkpoint['d_lr_scheduler'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            lr_scheduler.load_state_dict(checkpoint['scheduler'])
             start_epoch = checkpoint['epoch']
 
-
     #trainer
-    trainer = Trainer(model, g_optimizer=g_optimizer, g_lr_scheduler=g_lr_scheduler, d_optimizer=d_optimizer,
-                      d_lr_scheduler=d_lr_scheduler, device=args.device, criterion=criterion,
-                      batch_size=args.batch_size, obs_length=args.obs_length, pred_length=args.pred_length,
-                      augment=args.augment, normalize_scene=args.normalize_scene, save_every=args.save_every,
-                      start_length=args.start_length, val_flag=val_flag)
+    trainer = Trainer(model, optimizer=optimizer, lr_scheduler=lr_scheduler, device=args.device,
+                      criterion=criterion, batch_size=args.batch_size, obs_length=args.obs_length,
+                      pred_length=args.pred_length, augment=args.augment, normalize_scene=args.normalize_scene,
+                      save_every=args.save_every, start_length=args.start_length, obs_dropout=args.obs_dropout,
+                      augment_noise=args.augment_noise, val_flag=val_flag)
     trainer.loop(train_scenes, val_scenes, train_goals, val_goals, args.output, epochs=args.epochs, start_epoch=start_epoch)
 
 

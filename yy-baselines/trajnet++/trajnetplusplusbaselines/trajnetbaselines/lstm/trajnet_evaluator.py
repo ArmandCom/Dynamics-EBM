@@ -11,7 +11,6 @@ from evaluator.trajnet_evaluator import trajnet_evaluate
 from evaluator.write_utils import load_test_datasets, preprocess_test, write_predictions
 from .lstm import LSTMPredictor
 
-
 def predict_scene(predictor, model_name, paths, scene_goal, args):
     """For each scene, get model predictions"""
     paths = preprocess_test(paths, args.obs_length)

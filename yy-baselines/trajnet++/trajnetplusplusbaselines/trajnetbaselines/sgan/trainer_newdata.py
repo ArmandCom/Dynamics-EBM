@@ -26,7 +26,7 @@ from .sgan import LSTMGenerator, LSTMDiscriminator
 from .. import __version__ as VERSION
 
 from ..lstm.utils import center_scene, random_rotation
-from ..lstm.data_load_utils import prepare_data
+from ..lstm.data_load_utils import prepare_data, prepare_new_data
 
 
 class Trainer(object):
@@ -89,6 +89,7 @@ class Trainer(object):
 
         print('epoch', epoch)
 
+        scenes = list(scenes)
         random.shuffle(scenes)
         epoch_loss = 0.0
         self.model.train()
@@ -102,20 +103,17 @@ class Trainer(object):
 
         d_steps_left = self.model.d_steps
         g_steps_left = self.model.g_steps
-        for scene_i, (filename, scene_id, paths) in enumerate(scenes):
+        for scene_i, scene in enumerate(scenes):
             scene_start = time.time()
+            n_objects = scene.shape[1]
+            # make new scene
+            # scene = trajnetplusplustools.Reader.paths_to_xy(paths)
 
-            ## make new scene
-            scene = trajnetplusplustools.Reader.paths_to_xy(paths)
-
-            ## get goals
-            if goals is not None:
-                scene_goal = np.array(goals[filename][scene_id])
-            else:
-                scene_goal = np.array([[0, 0] for path in paths])
+            scene_goal = np.array([[0, 0] for i in range(n_objects)])
 
             ## Drop Distant
-            scene, mask = drop_distant(scene) # mask: Bool[NO]
+            # sel_scene, mask = drop_distant(sel_scene)
+            mask = [True]*n_objects
             scene_goal = scene_goal[mask]
 
             ##process scene
@@ -123,10 +121,10 @@ class Trainer(object):
                 scene, _, _, scene_goal = center_scene(scene, self.obs_length, goals=scene_goal)
             if self.augment:
                 scene, scene_goal = random_rotation(scene, goals=scene_goal)
-            
+
             ## Augment scene to batch of scenes
             batch_scene.append(scene)
-            batch_split.append(int(scene.shape[1]))
+            batch_split.append(int(n_objects))
             batch_scene_goal.append(scene_goal)
 
             if ((scene_i + 1) % self.batch_size == 0) or ((scene_i + 1) == len(scenes)):
@@ -194,6 +192,7 @@ class Trainer(object):
 
         val_loss = 0.0
         test_loss = 0.0
+        scenes = list(scenes)
         self.model.train()  # so that it does not return positions but still normals
 
         ## Initialize batch of scenes
@@ -201,19 +200,16 @@ class Trainer(object):
         batch_scene_goal = []
         batch_split = [0]
 
-        for scene_i, (filename, scene_id, paths) in enumerate(scenes):
+        for scene_i, scene in enumerate(scenes):
             # make new scene
-            scene = trajnetplusplustools.Reader.paths_to_xy(paths)
+            # scene = trajnetplusplustools.Reader.paths_to_xy(paths)
+            n_objects = scene.shape[1]
 
-            ## get goals
-            if goals is not None:
-                # scene_goal = np.array([goals[path[0].pedestrian] for path in paths])
-                scene_goal = np.array(goals[filename][scene_id])
-            else:
-                scene_goal = np.array([[0, 0] for path in paths])
+            scene_goal = np.array([[0, 0] for i in range(scene.shape[1])])
 
             ## Drop Distant
-            scene, mask = drop_distant(scene)
+            # sel_scene, mask = drop_distant(sel_scene)
+            mask = [True]*n_objects
             scene_goal = scene_goal[mask]
 
             ##process scene
@@ -405,9 +401,9 @@ def main(epochs=25):
                         help='number of epochs')
     parser.add_argument('--save_every', default=5, type=int,
                         help='frequency of saving model (in terms of epochs)')
-    parser.add_argument('--obs_length', default=9, type=int,
+    parser.add_argument('--obs_length', default=59, type=int,
                         help='observation length')
-    parser.add_argument('--pred_length', default=12, type=int,
+    parser.add_argument('--pred_length', default=40, type=int,
                         help='prediction length')
     parser.add_argument('--start_length', default=0, type=int,
                         help='starting time step of encoding observation')
@@ -549,14 +545,14 @@ def main(epochs=25):
         args.load_state = args.load_full_state
 
     # add args.device
-    args.device = torch.device('cpu')
+    # args.device = torch.device('cpu')
     if not args.disable_cuda and torch.cuda.is_available():
         args.device = torch.device('cuda')
 
     args.path = 'DATA_BLOCK/' + args.path
     ## Prepare data
-    train_scenes, train_goals, _ = prepare_data(args.path, subset='/train/', sample=args.sample, goals=args.goals)
-    val_scenes, val_goals, val_flag = prepare_data(args.path, subset='/val/', sample=args.sample, goals=args.goals)
+    train_scenes, train_goals, _ = prepare_new_data(args.path, subset='/train/', sample=args.sample, goals=args.goals)
+    val_scenes, val_goals, val_flag = prepare_new_data(args.path, subset='/val/', sample=args.sample, goals=args.goals)
 
     ## pretrained pool model (if any)
     pretrained_pool = None
