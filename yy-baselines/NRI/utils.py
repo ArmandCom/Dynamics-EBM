@@ -119,23 +119,27 @@ def load_data(batch_size=1, suffix=''):
 
     dset = suffix[1:-1]
     if dset == 'springs':
-        suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
+        # suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
+        suffix += 'inter0.1_sf100_lentrain10000_nstrain50000'
     elif dset == 'charged':
-        suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
+        # suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
+        suffix += 'inter0.5_sf100_lentrain10000_nstrain50000'
     elif dset == 'charged-springs':
         suffix += 'inter_s0.1_c0.5_sf50_lentrain5000_nstrain50000_mixedbynode'
     else: raise NotImplementedError
+    sf = 100
+    norm_cte = 1000/sf
 
     loc_train = np.load(data_root + '/loc_train' + suffix + '.npy')
-    vel_train = np.load(data_root + '/vel_train' + suffix + '.npy') / 20
+    vel_train = np.load(data_root + '/vel_train' + suffix + '.npy') / norm_cte
     edges_train = np.load(data_root + '/edges_train' + suffix + '.npy')
 
     loc_valid = np.load(data_root + '/loc_valid' + suffix + '.npy')
-    vel_valid = np.load(data_root + '/vel_valid' + suffix + '.npy') / 20
+    vel_valid = np.load(data_root + '/vel_valid' + suffix + '.npy') / norm_cte
     edges_valid = np.load(data_root + '/edges_valid' + suffix + '.npy')
 
     loc_test = np.load(data_root + '/loc_test' + suffix + '.npy')
-    vel_test = np.load(data_root + '/vel_test' + suffix + '.npy') / 20
+    vel_test = np.load(data_root + '/vel_test' + suffix + '.npy') / norm_cte
     edges_test = np.load(data_root + '/edges_test' + suffix + '.npy')
 
     # [num_samples, num_timesteps, num_dims, num_atoms]

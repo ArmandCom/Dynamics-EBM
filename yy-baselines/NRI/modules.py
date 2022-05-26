@@ -125,7 +125,7 @@ class MLPEncoder(nn.Module):
 
     def forward(self, inputs, rel_rec, rel_send):
         # Input shape: [num_sims, num_atoms, num_timesteps, num_dims] [128, 5, 49, 4]
-        x = inputs.view(inputs.size(0), inputs.size(1), -1).contiguous() # [128, 5, 196]
+        x = inputs.view(inputs.size(0), inputs.size(1), -1)#.contiguous() # [128, 5, 196]
         # New shape: [num_sims, num_atoms, num_timesteps*num_dims]
 
         x = self.mlp1(x)  # 2-layer ELU net per node
@@ -177,17 +177,17 @@ class CNNEncoder(nn.Module):
     def node2edge_temporal(self, inputs, rel_rec, rel_send):
         # NOTE: Assumes that we have the same graph across all samples.
 
-        x = inputs.view(inputs.size(0), inputs.size(1), -1).contiguous()
+        x = inputs.view(inputs.size(0), inputs.size(1), -1)#.contiguous()
 
         receivers = torch.matmul(rel_rec, x)
         receivers = receivers.view(inputs.size(0) * receivers.size(1),
-                                   inputs.size(2), inputs.size(3)).contiguous()
+                                   inputs.size(2), inputs.size(3))#.contiguous()
         receivers = receivers.transpose(2, 1)
 
         senders = torch.matmul(rel_send, x)
         senders = senders.view(inputs.size(0) * senders.size(1),
                                inputs.size(2),
-                               inputs.size(3)).contiguous()
+                               inputs.size(3))#.contiguous()
         senders = senders.transpose(2, 1)
 
         # receivers and senders have shape:
@@ -213,7 +213,7 @@ class CNNEncoder(nn.Module):
         # Input has shape: [num_sims, num_atoms, num_timesteps, num_dims]
         edges = self.node2edge_temporal(inputs, rel_rec, rel_send)
         x = self.cnn(edges)
-        x = x.view(inputs.size(0), (inputs.size(1) - 1) * inputs.size(1), -1).contiguous()
+        x = x.view(inputs.size(0), (inputs.size(1) - 1) * inputs.size(1), -1)#.contiguous()
         x = self.mlp1(x)
         x_skip = x
 
@@ -325,8 +325,8 @@ class SimulationDecoder(nn.Module):
         # Broadcasting/shape tricks for parallel processing of time steps
         loc = loc.permute(0, 2, 1, 3).contiguous()
         vel = vel.permute(0, 2, 1, 3).contiguous()
-        loc = loc.view(inputs.size(0) * (inputs.size(2) - 1), inputs.size(1), 2).contiguous()
-        vel = vel.view(inputs.size(0) * (inputs.size(2) - 1), inputs.size(1), 2).contiguous()
+        loc = loc.view(inputs.size(0) * (inputs.size(2) - 1), inputs.size(1), 2)#.contiguous()
+        vel = vel.view(inputs.size(0) * (inputs.size(2) - 1), inputs.size(1), 2)#.contiguous()
 
         loc, vel = self.unnormalize(loc, vel)
 
@@ -340,7 +340,7 @@ class SimulationDecoder(nn.Module):
         edges[:, offdiag_indices] = relations.float()
 
         edges = edges.view(relations.size(0), inputs.size(1),
-                           inputs.size(1)).contiguous()
+                           inputs.size(1))#.contiguous()
 
         self.out = []
 
@@ -361,7 +361,7 @@ class SimulationDecoder(nn.Module):
 
                 # Tricks for parallel processing of time steps
                 pair_dist = pair_dist.view(inputs.size(0), (inputs.size(2) - 1),
-                                           inputs.size(1), inputs.size(1), 2).contiguous()
+                                           inputs.size(1), inputs.size(1), 2)#.contiguous()
                 forces = (
                         forces_size.unsqueeze(-1).unsqueeze(1) * pair_dist).sum(
                     3)
@@ -375,18 +375,18 @@ class SimulationDecoder(nn.Module):
                 l2_dist_power3 = l2_dist_power3.view(inputs.size(0),
                                                      (inputs.size(2) - 1),
                                                      inputs.size(1),
-                                                     inputs.size(1)).contiguous()
+                                                     inputs.size(1))#.contiguous()
                 forces_size = forces_size.unsqueeze(1) / (l2_dist_power3 + _EPS)
 
                 pair_dist = torch.cat(
                     (dist_x.unsqueeze(-1), dist_y.unsqueeze(-1)),
                     -1)
                 pair_dist = pair_dist.view(inputs.size(0), (inputs.size(2) - 1),
-                                           inputs.size(1), inputs.size(1), 2).contiguous()
+                                           inputs.size(1), inputs.size(1), 2)#.contiguous()
                 forces = (forces_size.unsqueeze(-1) * pair_dist).sum(3)
 
             forces = forces.view(inputs.size(0) * (inputs.size(2) - 1),
-                                 inputs.size(1), 2).contiguous()
+                                 inputs.size(1), 2)#.contiguous()
 
             if '_charged' in self.interaction_type:  # charged particle sim
                 # Clip forces
@@ -402,8 +402,8 @@ class SimulationDecoder(nn.Module):
 
         loc, vel = self.renormalize(loc, vel)
 
-        loc = loc.view(inputs.size(0), (inputs.size(2) - 1), inputs.size(1), 2).contiguous()
-        vel = vel.view(inputs.size(0), (inputs.size(2) - 1), inputs.size(1), 2).contiguous()
+        loc = loc.view(inputs.size(0), (inputs.size(2) - 1), inputs.size(1), 2)#.contiguous()
+        vel = vel.view(inputs.size(0), (inputs.size(2) - 1), inputs.size(1), 2)#.contiguous()
 
         loc = loc.permute(0, 2, 1, 3)
         vel = vel.permute(0, 2, 1, 3)

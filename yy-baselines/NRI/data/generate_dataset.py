@@ -8,13 +8,13 @@ parser.add_argument('--simulation', type=str, default='charged-springs',
                     help='What simulation to generate.')
 parser.add_argument('--num-train', type=int, default=50000,
                     help='Number of training simulations to generate.')
-parser.add_argument('--num-valid', type=int, default=1000,
+parser.add_argument('--num-valid', type=int, default=10000,
                     help='Number of validation simulations to generate.')
-parser.add_argument('--num-test', type=int, default=1000,
+parser.add_argument('--num-test', type=int, default=10000,
                     help='Number of test simulations to generate.')
-parser.add_argument('--length', type=int, default=5000,
+parser.add_argument('--length', type=int, default=10000,
                     help='Length of trajectory.')
-parser.add_argument('--length-test', type=int, default=5000,
+parser.add_argument('--length-test', type=int, default=10000,
                     help='Length of test set trajectory.')
 parser.add_argument('--sample-freq', type=int, default=100,
                     help='How often to sample the trajectory.')
@@ -30,7 +30,7 @@ if args.simulation == 'springs':
                     # box_size=float('inf')
                     )
     suffix = '_springs'
-if args.simulation == 'springs-random-temp':
+elif args.simulation == 'springs-random-temp':
     sim = SpringSimRandStrength(noise_var=0.0, n_balls=args.n_balls,
                                 interaction_strength=[.1, 1]
                                 # box_size=float('inf')

@@ -204,9 +204,12 @@ def train(epoch, best_val_loss):
         if args.cuda:
             data, relations = data.cuda(), relations.cuda()
         data, relations = Variable(data), Variable(relations)
+
         optimizer.zero_grad()
-        # print('iter') [:, :, :args.timesteps - args.prediction_steps].clone()
-        logits = encoder(data, rel_rec, rel_send) # [128, 20, n_classes 2]
+        # print('iter')
+        data_obs = Variable(data[:, :, :args.timesteps - args.prediction_steps].clone(), volatile=True)
+
+        logits = encoder(data_obs, rel_rec, rel_send) # [128, 20, n_classes 2]
         edges = gumbel_softmax(logits, tau=args.temp, hard=args.hard)
         prob = my_softmax(logits, -1)
         # print('encoded')
@@ -238,14 +241,14 @@ def train(epoch, best_val_loss):
         loss.backward()
         optimizer.step()
 
-        # try:
-        #     mse_train.append(F.mse_loss(output, target).data[0])
-        #     nll_train.append(loss_nll.data[0])
-        #     kl_train.append(loss_kl.data[0])
-        # except:
-        mse_train.append(F.mse_loss(output, target).item())
-        nll_train.append(loss_nll.item())
-        kl_train.append(loss_kl.item())
+        try:
+            mse_train.append(F.mse_loss(output, target).data[0])
+            nll_train.append(loss_nll.data[0])
+            kl_train.append(loss_kl.data[0])
+        except:
+            mse_train.append(F.mse_loss(output, target).item())
+            nll_train.append(loss_nll.item())
+            kl_train.append(loss_kl.item())
 
     nll_val = []
     acc_val = []
@@ -259,8 +262,8 @@ def train(epoch, best_val_loss):
             data, relations = data.cuda(), relations.cuda()
         data, relations = Variable(data, volatile=True), Variable(
             relations, volatile=True)
-        # [:, :, :args.timesteps - args.prediction_steps].clone()
-        logits = encoder(data, rel_rec, rel_send)
+        data_obs = Variable(data[:, :, :args.timesteps - args.prediction_steps].clone(), volatile=True)
+        logits = encoder(data_obs, rel_rec, rel_send)
         edges = gumbel_softmax(logits, tau=args.temp, hard=True)
         prob = my_softmax(logits, -1)
 
@@ -274,14 +277,14 @@ def train(epoch, best_val_loss):
         acc = edge_accuracy(logits, relations)
         acc_val.append(acc)
 
-        # try:
-        #     mse_val.append(F.mse_loss(output, target).data[0])
-        #     nll_val.append(loss_nll.data[0])
-        #     kl_val.append(loss_kl.data[0])
-        # except:
-        mse_val.append(F.mse_loss(output, target).item())
-        nll_val.append(loss_nll.item())
-        kl_val.append(loss_kl.item())
+        try:
+            mse_val.append(F.mse_loss(output, target).data[0])
+            nll_val.append(loss_nll.data[0])
+            kl_val.append(loss_kl.data[0])
+        except:
+            mse_val.append(F.mse_loss(output, target).item())
+            nll_val.append(loss_nll.item())
+            kl_val.append(loss_kl.item())
 
     print('Epoch: {:04d}'.format(epoch),
           'nll_train: {:.10f}'.format(np.mean(nll_train)),
@@ -329,9 +332,9 @@ def test():
         data, relations = Variable(data, volatile=True), Variable(
             relations, volatile=True)
 
-        assert data.size(2) - args.prediction_steps >= args.timesteps
+        assert data.size(2) >= args.timesteps
 
-        data_encoder = data[:, :, :args.timesteps, :].contiguous()
+        data_encoder = data[:, :, :args.timesteps-args.prediction_steps, :].contiguous()
         data_decoder = data[:, :, -args.prediction_steps:, :].contiguous() # TODO: Modified: first it was
 
         logits = encoder(data_encoder, rel_rec, rel_send)
@@ -348,14 +351,14 @@ def test():
         acc = edge_accuracy(logits, relations)
         acc_test.append(acc)
 
-        # try:
-        #     mse_test.append(F.mse_loss(output, target).data[0])
-        #     nll_test.append(loss_nll.data[0])
-        #     kl_test.append(loss_kl.data[0])
-        # except:
-        mse_test.append(F.mse_loss(output, target).item())
-        nll_test.append(loss_nll.item())
-        kl_test.append(loss_kl.item())
+        try:
+            mse_test.append(F.mse_loss(output, target).data[0])
+            nll_test.append(loss_nll.data[0])
+            kl_test.append(loss_kl.data[0])
+        except:
+            mse_test.append(F.mse_loss(output, target).item())
+            nll_test.append(loss_nll.item())
+            kl_test.append(loss_kl.item())
 
         # For plotting purposes
         if args.decoder == 'rnn':
@@ -376,7 +379,6 @@ def test():
             target = data_plot[:, :, 1:, :]
 
         mse = ((target - output) ** 2).mean(dim=0).mean(dim=0).mean(dim=-1)
-        print(mse.shape)
         tot_mse += mse.data.cpu().numpy()
         counter += 1
 
