@@ -161,11 +161,8 @@ def init_model(FLAGS, device, dataset):
     # Option 1: All same model
     model = modelname(FLAGS, dataset).to(device)
     models = [model for i in range(1)]
-
     n_latents = FLAGS.ensembles if FLAGS.no_mask else FLAGS.ensembles//2
     models.append(nn.Sequential(
-                                # nn.Linear(FLAGS.latent_dim, FLAGS.latent_dim),
-                                # nn.ReLU(),
                                 nn.Linear(FLAGS.latent_dim * n_latents, 1),
                                 ).to(device))
 
@@ -237,8 +234,12 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
         #                         - feat[:, :,  FLAGS.num_fixed_timesteps:][nonan_mask[:, :,  FLAGS.num_fixed_timesteps:]], 2).mean()
         #
         #     logger.add_scalar('aaa-L2_loss_test', l2_loss.item(), step)
-
-    print('Accuracy: {}'.format( sum(test_accuracy) / len(test_accuracy)))
+    # print(test_accuracy)
+    # print(test_accuracy[0])
+    # print(pred_edge_oh[0], target[0])
+    mean_acc = sum(test_accuracy) / len(test_accuracy)
+    # std_acc = torch.sqrt(((test_accuracy - mean_acc)**2).sum() / len(mean_acc)) # TODO: review
+    print('Accuracy: {}, Len: {}'.format(  1 - mean_acc, len(test_accuracy)))
     [model.train() for model in models]
 
 def train(train_dataloader, test_dataloader, logger, models, models_ema, optimizers, FLAGS, mask, logdir, rank_idx, replay_buffer=None):
@@ -271,10 +272,10 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             else: feat_enc = feat
             feat_enc = normalize_trajectories(feat_enc[:, :, FLAGS.num_fixed_timesteps:], augment=True, normalize=FLAGS.normalize_data_latent) # TODO: CHECK ROTATION
             # [:, :, FLAGS.num_fixed_timesteps+torch.randint(5, (1,)):]
-            latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
-
-            if isinstance(latent, tuple):
-                latent, weights = latent
+            with torch.no_grad():
+                latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
+                if isinstance(latent, tuple):
+                    latent, weights = latent
 
             # print(latent.shape)
             pred_logits = models[1](latent.flatten(-2,-1))
@@ -347,7 +348,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
                 print('Experiment: ' + exp_name[-2] + '/' + exp_name[-1])
 
             it += 1
-
+        test(test_dataloader, models, models_ema, FLAGS, mask, step=it, save=False, logger=logger, replay_buffer=None)
 def main_single(rank, FLAGS):
     rank_idx = FLAGS.node_rank * FLAGS.gpus + rank
     world_size = FLAGS.nodes * FLAGS.gpus
@@ -508,7 +509,8 @@ def main_single(rank, FLAGS):
     # mask = create_masks(FLAGS, torch.device("cuda"))
     mask = None
     if FLAGS.train:
-        models = [model.train() for model in models]
+        # models = [model.train() for model in models]
+        models = [models[0].eval(), models[1].train()]
     else:
         models = [model.eval() for model in models]
 

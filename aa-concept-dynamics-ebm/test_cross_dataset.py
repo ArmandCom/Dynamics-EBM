@@ -608,11 +608,11 @@ def main_single(rank, FLAGS):
                 FLAGS.ns_iteration_end = FLAGS_OLD.ns_iteration_end
                 FLAGS.num_steps_end = FLAGS_OLD.num_steps_end
 
-                FLAGS.model_name = FLAGS_OLD.model_name
-                FLAGS.additional_model = FLAGS_OLD.additional_model
+                # FLAGS.model_name = FLAGS_OLD.model_name
+                # FLAGS.additional_model = FLAGS_OLD.additional_model
                 # FLAGS.new_dataset = FLAGS_OLD.new_dataset
                 # FLAGS.compute_energy = FLAGS_OLD.compute_energy
-                FLAGS.pred_only = FLAGS_OLD.pred_only
+                # FLAGS.pred_only = FLAGS_OLD.pred_only
                 FLAGS.latent_ln = FLAGS_OLD.latent_ln
                 FLAGS.masking_type = FLAGS_OLD.masking_type
                 FLAGS.no_mask = FLAGS_OLD.no_mask

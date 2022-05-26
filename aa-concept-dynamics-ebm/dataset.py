@@ -63,18 +63,23 @@ class SpringsParticles(data.Dataset):
         # n_balls=5, box_size=5., loc_std=1., vel_norm=0.5,
         # interaction_strength=1., noise_var=0.):
         self.args = args
+        old = False
         self.n_objects = args.n_objects
         suffix = '_springs'
         # suffix += '-random-temp'
         suffix += str(self.n_objects)
         # suffix += 'inter0.1_nowalls_sf100_len5000'
-        # suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
+        if old:
+            suffix += 'inter0.1_sf50_lentrain5000_nstrain50000'
         # suffix += 'inter0.1_sf100_lentrain10000_nstrain50000'
         # suffix += 'inter_s0.1-1.0_sf50_lentrain5000_nstrain50000'
         # print('Dataset: SPRINGS with random edge value 0.1 - 1')
-        suffix += ''
         # suffix += 'inter0.1_nowalls_sf20_lentrain5000_nstrain50000' # 249 samples # TODO: Change velocity normalization
-        feat, edges, stats = self._load_data(suffix=suffix, split=split)
+
+        if old:
+            feat, edges, stats = self._load_data_old(suffix=suffix, split=split)
+        else: feat, edges, stats = self._load_data(suffix=suffix, split=split)
+
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
         self.length = feat.shape[0]
@@ -199,65 +204,65 @@ class SpringsParticles(data.Dataset):
         else: raise NotImplementedError
         return feat, edges, (loc_max, loc_min, vel_max, vel_min)
 
-    # def _load_data(self, suffix='', split='train'):
-    #     loc = np.load('/data/Armand/NRI/loc_' + split + suffix + '.npy')
-    #     vel = np.load('/data/Armand/NRI/vel_' + split + suffix + '.npy')
-    #     edges = np.load('/data/Armand/NRI/edges_' + split + suffix + '.npy')
-    #
-    #     # [num_samples, num_timesteps, num_dims, num_atoms]
-    #     num_atoms = loc.shape[3]
-    #
-    #     # Note: unnormalize
-    #
-    #     loc_max = loc.max()
-    #     loc_min = loc.min()
-    #     vel = vel / 10
-    #     # Note: In simulation our increase in T (delta T) is 0.001.
-    #     #  Then we sample 1/100 generated samples.
-    #     #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
-    #     vel_max = vel.max()
-    #     vel_min = vel.min()
-    #
-    #     print("Normalized Springs Dataset")
-    #     # Normalize to [-1, 1]
-    #     loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-    #     # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
-    #     vel = vel * 2 / (loc_max - loc_min)
-    #
-    #     # print("Standardized Springs Dataset")
-    #     # loc_mean = loc.mean()
-    #     # loc_std = loc.std()
-    #     # loc = (loc - loc_mean) / loc_std
-    #     # vel = vel / loc_std
-    #
-    #     # print("Unnormalized Spring Dataset")
-    #     # loc_max = None
-    #     # loc_min = None
-    #     # vel_max = None
-    #     # vel_min = None
-    #     # loc = loc / 5.
-    #     # vel = vel / 5.
-    #
-    #     # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
-    #     loc = np.transpose(loc, [0, 3, 1, 2])
-    #     vel = np.transpose(vel, [0, 3, 1, 2])
-    #     feat = np.concatenate([loc, vel], axis=3)
-    #     edges = np.reshape(edges, [-1, num_atoms ** 2])
-    #     edges = np.array((edges + 1) / 2, dtype=np.int64)
-    #
-    #     feat = torch.FloatTensor(feat)
-    #     edges = torch.LongTensor(edges)
-    #
-    #     # Exclude self edges
-    #     off_diag_idx = np.ravel_multi_index(
-    #         np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
-    #         [num_atoms, num_atoms])
-    #     edges = edges[:, off_diag_idx]
-    #
-    #     # data = TensorDataset(feat, edges)
-    #     # data_loader = DataLoader(data, batch_size=batch_size)
-    #     # TODO: we need a way to encode the walls. Maybe add the minmax.
-    #     return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
+    def _load_data_old(self, suffix='', split='train'):
+        loc = np.load('/data/Armand/NRI/loc_' + split + suffix + '.npy')
+        vel = np.load('/data/Armand/NRI/vel_' + split + suffix + '.npy')
+        edges = np.load('/data/Armand/NRI/edges_' + split + suffix + '.npy')
+
+        # [num_samples, num_timesteps, num_dims, num_atoms]
+        num_atoms = loc.shape[3]
+
+        # Note: unnormalize
+
+        loc_max = loc.max()
+        loc_min = loc.min()
+        vel = vel / 20
+        # Note: In simulation our increase in T (delta T) is 0.001.
+        #  Then we sample 1/100 generated samples.
+        #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
+        vel_max = vel.max()
+        vel_min = vel.min()
+
+        print("Normalized Springs Dataset")
+        # Normalize to [-1, 1]
+        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+        vel = vel * 2 / (loc_max - loc_min)
+
+        # print("Standardized Springs Dataset")
+        # loc_mean = loc.mean()
+        # loc_std = loc.std()
+        # loc = (loc - loc_mean) / loc_std
+        # vel = vel / loc_std
+
+        # print("Unnormalized Spring Dataset")
+        # loc_max = None
+        # loc_min = None
+        # vel_max = None
+        # vel_min = None
+        # loc = loc / 5.
+        # vel = vel / 5.
+
+        # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
+        loc = np.transpose(loc, [0, 3, 1, 2])
+        vel = np.transpose(vel, [0, 3, 1, 2])
+        feat = np.concatenate([loc, vel], axis=3)
+        edges = np.reshape(edges, [-1, num_atoms ** 2])
+        edges = np.array((edges + 1) / 2, dtype=np.int64)
+
+        feat = torch.FloatTensor(feat)
+        edges = torch.LongTensor(edges)
+
+        # Exclude self edges
+        off_diag_idx = np.ravel_multi_index(
+            np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+            [num_atoms, num_atoms])
+        edges = edges[:, off_diag_idx]
+
+        # data = TensorDataset(feat, edges)
+        # data_loader = DataLoader(data, batch_size=batch_size)
+        # TODO: we need a way to encode the walls. Maybe add the minmax.
+        return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
 
 class ChargedParticles(data.Dataset):
     def __init__(self, args, split):
@@ -265,15 +270,19 @@ class ChargedParticles(data.Dataset):
         # interaction_strength=1., noise_var=0.):
         self.args = args
         self.n_objects = args.n_objects
-
+        old = False
         suffix = '_charged'+str(self.n_objects)
         # suffix += '_nobox_05int-strength'
         # suffix += 'inter0.5_nowalls_sf100_len5000'
-        # suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
+        if old:
+            suffix += 'inter0.5_sf50_lentrain5000_nstrain50000'
         # suffix += ''
         # suffix += 'inter0.5_nowalls_sf20_lentrain5000_nstrain50000' # 249 samples # TODO: Change velocity normalization
 
-        feat, edges, stats = self._load_data(suffix=suffix, split=split)
+        if old:
+            feat, edges, stats = self._load_data_old(suffix=suffix, split=split)
+
+        else: feat, edges, stats = self._load_data(suffix=suffix, split=split)
         # TODO: loc_max, loc_min, vel_max, vel_min
         assert self.n_objects == feat.shape[1]
         self.length = feat.shape[0]
@@ -400,60 +409,60 @@ class ChargedParticles(data.Dataset):
         return feat, edges, (loc_max, loc_min, vel_max, vel_min)
 
 
-    # def _load_data(self, suffix='', split='train'):
-    #     loc = np.load('/data/Armand/NRI/loc_' + split + suffix + '.npy')
-    #     vel = np.load('/data/Armand/NRI/vel_' + split + suffix + '.npy')
-    #     edges = np.load('/data/Armand/NRI/edges_' + split + suffix + '.npy')
-    #
-    #     # [num_samples, num_timesteps, num_dims, num_atoms]
-    #     num_atoms = loc.shape[3]
-    #
-    #     # Note: unnormalize
-    #
-    #     loc_max = loc.max()
-    #     loc_min = loc.min()
-    #     vel = vel / 20 # 10 if sf 100, 50 if sf 20
-    #     # Note: In simulation our increase in T (delta T) is 0.001.
-    #     #  Then we sample 1/100 generated samples.
-    #     #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
-    #     vel_max = vel.max()
-    #     vel_min = vel.min()
-    #
-    #     print("Normalized Charged Dataset")
-    #     # Normalize to [-1, 1]
-    #     loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
-    #     vel = vel * 2 / (loc_max - loc_min)
-    #     # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
-    #
-    #
-    #     # print("Standardized Charged Dataset")
-    #     # loc_mean = loc.mean()
-    #     # loc_std = loc.std()
-    #     # loc = (loc - loc_mean) / loc_std
-    #     # vel = vel / loc_std
-    #
-    #     # print("Unnormalized Charged Dataset")
-    #
-    #     # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
-    #     loc = np.transpose(loc, [0, 3, 1, 2])
-    #     vel = np.transpose(vel, [0, 3, 1, 2])
-    #     feat = np.concatenate([loc, vel], axis=3)
-    #     edges = np.reshape(edges, [-1, num_atoms ** 2])
-    #     edges = np.array((edges + 1) / 2, dtype=np.int64)
-    #
-    #     feat = torch.FloatTensor(feat)
-    #     edges = torch.LongTensor(edges)
-    #
-    #     # Exclude self edges
-    #     off_diag_idx = np.ravel_multi_index(
-    #         np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
-    #         [num_atoms, num_atoms])
-    #     edges = edges[:, off_diag_idx]
-    #
-    #     # data = TensorDataset(feat, edges)
-    #     # data_loader = DataLoader(data, batch_size=batch_size)
-    #     # TODO: we need a way to encode the walls. Maybe add the minmax.
-    #     return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
+    def _load_data_old(self, suffix='', split='train'):
+        loc = np.load('/data/Armand/NRI/loc_' + split + suffix + '.npy')
+        vel = np.load('/data/Armand/NRI/vel_' + split + suffix + '.npy')
+        edges = np.load('/data/Armand/NRI/edges_' + split + suffix + '.npy')
+
+        # [num_samples, num_timesteps, num_dims, num_atoms]
+        num_atoms = loc.shape[3]
+
+        # Note: unnormalize
+
+        loc_max = loc.max()
+        loc_min = loc.min()
+        vel = vel / 20 # 10 if sf 100, 50 if sf 20
+        # Note: In simulation our increase in T (delta T) is 0.001.
+        #  Then we sample 1/100 generated samples.
+        #  Therefore the ratio between loc and velocity is vel/(incrLoc) = 10
+        vel_max = vel.max()
+        vel_min = vel.min()
+
+        print("Normalized Charged Dataset")
+        # Normalize to [-1, 1]
+        loc = (loc - loc_min) * 2 / (loc_max - loc_min) - 1
+        vel = vel * 2 / (loc_max - loc_min)
+        # vel = (vel - vel_min) * 2 / (vel_max - vel_min) - 1
+
+
+        # print("Standardized Charged Dataset")
+        # loc_mean = loc.mean()
+        # loc_std = loc.std()
+        # loc = (loc - loc_mean) / loc_std
+        # vel = vel / loc_std
+
+        # print("Unnormalized Charged Dataset")
+
+        # Reshape to: [num_sims, num_atoms, num_timesteps, num_dims]
+        loc = np.transpose(loc, [0, 3, 1, 2])
+        vel = np.transpose(vel, [0, 3, 1, 2])
+        feat = np.concatenate([loc, vel], axis=3)
+        edges = np.reshape(edges, [-1, num_atoms ** 2])
+        edges = np.array((edges + 1) / 2, dtype=np.int64)
+
+        feat = torch.FloatTensor(feat)
+        edges = torch.LongTensor(edges)
+
+        # Exclude self edges
+        off_diag_idx = np.ravel_multi_index(
+            np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+            [num_atoms, num_atoms])
+        edges = edges[:, off_diag_idx]
+
+        # data = TensorDataset(feat, edges)
+        # data_loader = DataLoader(data, batch_size=batch_size)
+        # TODO: we need a way to encode the walls. Maybe add the minmax.
+        return feat, edges, (loc_max, loc_min, vel_max, vel_min) # TODO: Check how mins and maxes are used
 
 class ChargedSpringsParticles(data.Dataset):
     def __init__(self, args, split):
@@ -558,7 +567,7 @@ class ChargedSpringsParticles(data.Dataset):
 
         # Exclude self edges
         # off_diag_idx = np.ravel_multi_index(
-        #     np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+        #     np.where(np.ones((num isabella steward - Tour MIT_atoms, num_atoms)) - np.eye(num_atoms)),
         #     [num_atoms, num_atoms])
         # edges = edges[:, off_diag_idx]
 

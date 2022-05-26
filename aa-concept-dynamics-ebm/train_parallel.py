@@ -189,29 +189,34 @@ def forward_pass_models(models, feat_in, latent, FLAGS, rel_rec=None, rel_send=N
             else: energy = models[ii + 2*iii].forward(feat_in, curr_latent, rel_rec, rel_send) + energy
     if FLAGS.additional_model:
         energy = models[-1].forward(feat_in) + energy
-    energy = new_constraint('repel_origin', feat_in, energy)
+    # energy = new_constraint('attraction', feat_in, energy)
+    energy = new_constraint('velocity', feat_in, energy)
     return energy
 
 def new_constraint(type, feat_neg, energy):
     energy_add = 0
-    if type == 'repel_origin':
-        loc_x = feat_neg[..., :1]
-        loc_y = feat_neg[..., 1:2]
-        vel = feat_neg[..., 2:]
-        vel_x = feat_neg[..., 2:3]
-        vel_y = feat_neg[..., 3:4]
 
-        loc_mod = (loc_x**2 + loc_y**2)**(0.5)
-        vel_mod = (vel_x**2 + vel_y**2)**(0.5)
-        acc_mod = ((vel_x[..., 1:, :] - vel_x[..., :-1, :])**2 +
-                   (vel_y[..., 1:, :] - vel_y[..., :-1, :])**2)**(0.5)
+    loc_x = feat_neg[..., :1]
+    loc_y = feat_neg[..., 1:2]
+    vel = feat_neg[..., 2:]
+    vel_x = feat_neg[..., 2:3]
+    vel_y = feat_neg[..., 3:4]
 
-        # # Example 1 [-2e-2, 2e-2, 4e-2] # plotwithvel
-        # energy_add = - vel_mod
-        # energy_add = 4e-2 * energy_add.mean(3).mean(2)
+    loc_mod = (loc_x**2 + loc_y**2)**(0.5)
+    vel_mod = (vel_x**2 + vel_y**2)**(0.5)
+    acc_mod = ((vel_x[..., 1:, :] - vel_x[..., :-1, :])**2 +
+               (vel_y[..., 1:, :] - vel_y[..., :-1, :])**2)**(0.5)
 
+    if type == 'velocity':
+        # Example 1 [-2e-2, 2e-2, 4e-2] # plotwithvel
+        energy_add = - vel_mod
+        energy_add = 2e-2 * energy_add.mean(3).mean(2)
+
+    elif type == 'attraction':
         # # Example 2, attraction with the raw angle.
-        ref_point = (0.7, -0.4) #(loc_x[:, :1], loc_y[:, :1])
+        # ref_point = (0.7, -0.4) #paper figure
+        ref_point = (-1, -0.0) #additional
+
         vector_to_ref = torch.cat([loc_x-ref_point[0], loc_y-ref_point[1]], dim= -1)
         inner_product = (vector_to_ref*vel).sum(dim=-1)
         a_norm = vector_to_ref.pow(2).sum(dim=-1).pow(0.5)
@@ -219,13 +224,14 @@ def new_constraint(type, feat_neg, energy):
         cos = inner_product / (2 * a_norm * b_norm)
         angle = torch.acos(cos)
         angle = torch.minimum(angle, 2*torch.pi - angle)
-        energy_add = -0.4e-3 * angle.mean(2)
+        energy_add = -0.3e-3 * angle.mean(2)
 
         ## TESTS without much success
         # squared_angle = torch.minimum(angle, 2*torch.pi - angle)**2
         # energy_add = -1e-4 * squared_angle.mean(2)
         # angle = torch.minimum(angle, 2*torch.pi - angle)
         # energy_add = -0.5e-2 * angle.mean(2)
+    else: raise NotImplementedError
     energy = energy + energy_add
     return energy
 
@@ -320,7 +326,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
     # single_pass = input('Single pass? (y: Yes): ')
     # save = input('Save? (y: Yes, n: No): ')
     save = 'y'
-    single_pass = 'y'
+    single_pass = 'n'
     print('Begin test:')
     [model.eval() for model in models]
     energies = []
@@ -336,9 +342,15 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         bs = feat.size(0)
         feat_copy = feat.clone()
         [save_rel_matrices(model, rel_rec, rel_send) for model in models]
+        # if FLAGS.plot_attr == 'vel':
+        #     # print(feat[..., 2:].max(), feat[..., 2:].min())
+        #     vel_norm = feat[..., 2:].norm()
+        #     loc_diff_norm = (feat[..., 1:, :2] - feat[..., :-1, :2]).norm()
+        #     scale = loc_diff_norm / vel_norm
+        scale = 1
 
-        b_idx = 10
-        b_idx_ref = 0
+        b_idx = 30
+        b_idx_ref = 31 #27 ok
 
         rw_pair = None
         affected_nodes = None
@@ -449,11 +461,11 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                                           )
                     gradplots.append((feat_grad[b_idx:b_idx+1], feat_ori[b_idx:b_idx+1], latent[0], player_id, b_idx, factor))
                     plt.show()
-                    # logger.add_figure('gradients', get_trajectory_figure(feat_ori, lims=lims, b_idx=b_idx,
-                    #                                                      plot_type =FLAGS.plot_attr,
-                    #                                                      highlight_nodes = affected_nodes, grads = feat_grad,
-                    #                                                      args=FLAGS
-                    #                                                      )[1], 0)
+                    logger.add_figure('gradients', get_trajectory_figure(feat_ori, lims=lims, b_idx=b_idx,
+                                                                         plot_type =FLAGS.plot_attr,
+                                                                         highlight_nodes = affected_nodes, grads = feat_grad,
+                                                                         args=FLAGS
+                                                                         )[1], 0)
                     print('Gradients plotted.')
                     if factor_id < len(factors) - 1:
                         continue
@@ -479,7 +491,11 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                         exit()
 
                 if FLAGS.dataset == 'nba':
-                    n_timesteps = 30
+                    if FLAGS.plot_attr == 'vel':
+                        feat_negs = [torch.cat([feat_neg_i[..., :2], feat_neg_i[..., 2:]*scale], dim=-1) for feat_neg_i in feat_negs]
+                        feat[..., 2:] *= scale
+
+                    n_timesteps = 100
                     n_removed_timesteps = 1
                     feat = feat[:, :, n_removed_timesteps:n_timesteps]
                     feat_negs = [feat_neg_i[:, :, n_removed_timesteps:n_timesteps] for feat_neg_i in feat_negs]
@@ -515,12 +531,13 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                     lims = [-limneg, limpos]
                 # elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
                 #                            feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
+                logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
+                logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
                 for i_plt in range(len(feat_negs)):
                     logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + i_plt + 100*factor_id)
                 # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
                 logger.add_figure('test_manip_gen', get_trajectory_figure(feat_negs[-1], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + 100*factor_id)
-                logger.add_figure('test_manip_gt', get_trajectory_figure(feat, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
-                logger.add_figure('test_manip_gt_ref', get_trajectory_figure(feat, b_idx=b_idx_ref, lims=lims, plot_type =FLAGS.plot_attr, args=FLAGS)[1], step + 100*factor_id)
+
                 print('Plotted.')
                 if FLAGS.dataset == 'nba':
                     savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/new_constrain/')
@@ -528,10 +545,11 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                     if inp is not 'n':
                         # (feat_grad[b_idx:b_idx+1], feat_ori[b_idx:b_idx+1], latent, player_id, b_idx, factor)
                         savedir_i = savedir + inp + '_new_constrain_'
-                        np.save(savedir_i + 'feats.npy', feat.detach().cpu().numpy())
-                        np.save(savedir_i + 'feat_negs.npy', torch.stack(feat_negs).detach().cpu().numpy())
-                        np.save(savedir_i + 'feat_neg_last.npy',  feat_negs[-1].detach().cpu().numpy())
+                        np.save(savedir_i + 'feats.npy', feat[b_idx:b_idx+1].detach().cpu().numpy())
+                        np.save(savedir_i + 'feat_negs.npy', torch.stack(feat_negs)[:, b_idx:b_idx+1].detach().cpu().numpy())
+                        np.save(savedir_i + 'feat_neg_last.npy',  feat_negs[-1][b_idx:b_idx+1].detach().cpu().numpy())
                         print('results saved')
+                    else: continue
                 if FLAGS.compute_energy:
                     inp = input('Next: n; or Save with name: ')
                     if inp is not 'n':
@@ -677,6 +695,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
     start_time = time.perf_counter()
     for epoch in range(FLAGS.num_epoch):
         for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
+
             bs = feat.shape[0]
             loss = 0.0
             feat = feat.to(dev)
@@ -1103,6 +1122,7 @@ def main():
     FLAGS.sample = True
     FLAGS.exp = FLAGS.exp + FLAGS.dataset
     logdir = osp.join(FLAGS.logdir, 'experiments', FLAGS.exp)
+
 
     if not osp.exists(logdir):
         os.makedirs(logdir)

@@ -378,6 +378,11 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
     energies = []
     edge_list = []
     for (feat, edges), (rel_rec, rel_send), idx in train_dataloader:
+        if FLAGS.plot_attr == 'vel':
+            vel_norm = feat[..., 2:].norm()
+            loc_diff_norm = (feat[..., 1:, :2] - feat[..., :-1, :2]).norm()
+            scale = loc_diff_norm / vel_norm
+
         feat = feat.to(dev)
         nonan_mask = feat == feat
         feat[torch.logical_not(nonan_mask)] = 10
@@ -389,7 +394,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         feat_copy = feat.clone()
         [save_rel_matrices(model, rel_rec, rel_send) for model in models]
 
-        b_idx = 5
+        b_idx = 7
         b_idx_ref = 3
 
         rw_pair = None
@@ -425,8 +430,6 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
         latent = models[0].embed_latent(feat_enc, rel_rec, rel_send, edges=edges)
         if isinstance(latent, tuple):
             latent, weights = latent
-        ### NOTE: TEST: Random rotation of the input trajectory
-        # feat = normalize_trajectories(feat, augment=False, normalize=True) # We max min normalize the batch
 
         # TODO: make more efficient --> if mask[mask == 0].sum() == 0 or mask[mask == 1].sum() == 0: # Do only 1 loop
 
@@ -458,6 +461,7 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
             latent = (latent, mask)
 
             if FLAGS.pred_only:
+                feat_in = feat[: ,:, :-FLAGS.forecast]
                 feat = feat[: ,:, -FLAGS.forecast:] #[: ,:, -FLAGS.forecast:]
                 nonan_mask = feat == feat
 
@@ -502,6 +506,12 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                     lims = [-limneg, limpos]
                 elif lims is None and len(factors)>1: lims = [feat_negs[-1][b_idx][..., :2].min().detach().cpu().numpy(),
                                           feat_negs[-1][b_idx][..., :2].max().detach().cpu().numpy()]
+
+
+                if FLAGS.plot_attr == 'vel':
+                    feat_negs = [torch.cat([feat_neg_i[..., :2], feat_neg_i[..., 2:]*scale], dim=-1) for feat_neg_i in feat_negs]
+                    feat[..., 2:] *= scale
+                    feat_copy[..., 2:] *= scale
                 for i_plt in range(len(feat_negs)):
                     logger.add_figure('test_manip_gen_rec', get_trajectory_figure(feat_negs[i_plt], lims=lims, b_idx=b_idx, plot_type =FLAGS.plot_attr, highlight_nodes = affected_nodes, args=FLAGS)[1], step + i_plt + 100*factor_id)
                 # logger.add_figure('test_manip_gen', get_trajectory_figure(feat_neg, b_idx=b_idx, lims=lims, plot_type =FLAGS.plot_attr)[1], step)
@@ -520,6 +530,17 @@ def test_manipulate(train_dataloader, models, models_ema, FLAGS, step=0, save = 
                         np.save(savedir + 'gt_traj_pred.npy', feat[b_idx:b_idx+1].detach().cpu().numpy())
                         print('All saved in dir {}'.format(savedir))
                         exit()
+                else:
+                    savedir = os.path.join('/',*(logger.log_dir.split('/')[:-3]),'results/pred_rec_examples/')
+                    inp = input('Next: n; or Save generated sample with name: ')
+                    if inp is not 'n':
+                        if FLAGS.pred_only:
+                            savedir += inp + '_pred_'+FLAGS.dataset+'_'
+                        else: savedir += inp + '_rec-pred_'+FLAGS.dataset+'_'
+                        np.save(savedir + 'gt_traj_all.npy', feat_copy[b_idx:b_idx+1].detach().cpu().numpy())
+                        np.save(savedir + 'gt_traj_pred.npy', feat[b_idx:b_idx+1].detach().cpu().numpy())
+                        np.save(savedir + 'pred_all_samples.npy', torch.stack(feat_negs)[:, b_idx:b_idx+1].detach().cpu().numpy())
+                        print('All saved in dir {}'.format(savedir))
         if single_pass == 'y':
             break
             # elif logger is not None:
@@ -603,12 +624,15 @@ def test(train_dataloader, models, models_ema, FLAGS, mask,  step=0, save = Fals
                                                                                 create_graph=False) # TODO: why create_graph
         # print(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
         #            feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]), feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:].shape)
-        notpred = 19
-        if notpred != 0:
-            mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred],
-                       feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred]))
-        else:             mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
-                                                feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]))
+        # notpred = 0
+        # if notpred != 0:
+        #     mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred],
+        #                feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:-notpred]))
+        # else:             mse.append(F.mse_loss(feat_neg[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:],
+        #                                         feat[:, :,  -FLAGS.forecast + FLAGS.num_fixed_timesteps:]))
+        mse.append(F.mse_loss(feat_neg[:, :,  -1:],
+                              feat[:, :,  -1:]))
+
         # save = True
         if save:
             limpos = limneg = 1
@@ -680,6 +704,8 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
             if FLAGS.pred_only:
                 assert FLAGS.forecast > -1
                 feat = feat[: ,:, -FLAGS.forecast:]#[: ,:, -FLAGS.forecast:]
+
+
                 nonan_mask = feat == feat
 
 
@@ -737,6 +763,7 @@ def train(train_dataloader, test_dataloader, logger, models, models_ema, optimiz
 
             # pow_energy_rec = torch.pow(energy_neg, 2).mean()
             loss = loss + feat_loss + vel_loss #+ feat_loss_l1
+
 
             ### TEST FEATURE ###
             if FLAGS.cd_and_ae: # and it > 30000:
@@ -964,7 +991,7 @@ def main_single(rank, FLAGS):
         model_path = osp.join(logdir, "model_{}.pth".format(FLAGS.resume_iter))
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         FLAGS = checkpoint['FLAGS']
-        # logdir += '_5at150' # TODO: remove
+        # logdir += '_refined' # TODO: remove
 
         # FLAGS.normalize_data_latent = FLAGS_OLD.normalize_data_latent # Maybe we shouldn't override
         # FLAGS.factor_encoder = FLAGS_OLD.factor_encoder

@@ -473,7 +473,11 @@ class NodeGraphEBM_CNN(nn.Module):
         self.stride = 1
         state_dim = args.input_dim
         kernel_size = 5
-        self.skip_con = True
+        self.skip_con = True #True
+        if self.skip_con:
+            print('Swithced NodeGraphEBM_CNN skipcon to {}, set to False if mixing. And check stride!'.format (self.skip_con))
+        else:
+            print('Swithced NodeGraphEBM_CNN skipcon to {}. check stride!'.format (self.skip_con))
         self.obj_id_embedding = args.obj_id_embedding
         if args.obj_id_embedding:
             state_dim += args.obj_id_dim
@@ -638,6 +642,7 @@ class NodeGraphEBM_CNN(nn.Module):
         # x = x.reshape(BS, NR, *x.shape[-2:])
         # x = self.edge2node_temporal(x, rel_rec, rel_send) # [R, F] --> [N, F] # marshalling
         if self.skip_con:
+
             x = torch.cat((x, x_skip), dim=2)
 
         x = swish(self.mlp1(x)) # [N, F] --> [N, F]
