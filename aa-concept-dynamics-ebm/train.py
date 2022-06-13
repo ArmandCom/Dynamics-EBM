@@ -251,7 +251,11 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
 
         ## Step - LR
         if FLAGS.step_lr_decay_factor != 1.0:
-            step_lr = linear_annealing(None, i, start_step=5, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+            # Option 1:
+            step_lr = linear_annealing(None, i, start_step=0, end_step=num_steps-1, start_value=ini_step_lr, end_value=FLAGS.step_lr_decay_factor * ini_step_lr)
+            # Option 2:
+            step_lr = ini_step_lr *  (FLAGS.step_lr_decay_factor ** i)
+            # It works well
 
         ## Add Noise
         if FLAGS.noise_decay_factor != 1.0:
@@ -271,7 +275,7 @@ def  gen_trajectories(latent, FLAGS, models, models_ema, feat_neg, feat, num_ste
 
         # feat_grad = torch.clamp(feat_grad, min=-0.5, max=0.5) # TODO: Remove if useless
 
-        feat_neg = feat_neg - FLAGS.step_lr * feat_grad # GD computation
+        feat_neg = feat_neg - step_lr * feat_grad # GD computation
 
         feat_neg = torch.clamp(feat_neg, -1, 1) # TODO: put back on
         if FLAGS.num_fixed_timesteps > 0:
