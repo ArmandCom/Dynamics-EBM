@@ -216,7 +216,6 @@ def new_constraint(type, feat_neg, energy):
         # # Example 2, attraction with the raw angle.
         # ref_point = (0.7, -0.4) #paper figure
         ref_point = (-1, -0.0) #additional
-
         vector_to_ref = torch.cat([loc_x-ref_point[0], loc_y-ref_point[1]], dim= -1)
         inner_product = (vector_to_ref*vel).sum(dim=-1)
         a_norm = vector_to_ref.pow(2).sum(dim=-1).pow(0.5)
